@@ -4,3 +4,7 @@
 #include <stddef.h>
 
 bool route_fetch(const char *callsign, char *from, size_t fn, char *to, size_t tn);
+
+// NVS route cache (avoids re-querying adsbdb for the same flight across reboots).
+bool route_cache_get(const char *callsign, char *from, size_t fn, char *to, size_t tn);
+void route_cache_put(const char *callsign, const char *from, const char *to);

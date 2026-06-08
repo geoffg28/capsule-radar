@@ -6,6 +6,51 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <Preferences.h>
+#include <string.h>
+
+#define ROUTE_CACHE_MAX 200   // wrap the cache before it can crowd NVS
+
+// strip spaces -> a valid NVS key (callsigns are <= 8 chars)
+static void route_key(const char *callsign, char *out, size_t on) {
+    size_t j = 0;
+    for (const char *p = callsign; *p && j < on - 1; ++p)
+        if (*p != ' ') out[j++] = *p;
+    out[j] = 0;
+}
+
+bool route_cache_get(const char *callsign, char *from, size_t fn, char *to, size_t tn) {
+    if (fn) from[0] = 0;
+    if (tn) to[0] = 0;
+    if (!callsign || !callsign[0]) return false;
+    char key[12];
+    route_key(callsign, key, sizeof(key));
+    if (!key[0]) return false;
+    Preferences p;
+    if (!p.begin("routes", true)) return false;
+    String v = p.getString(key, "");
+    p.end();
+    if (v.length() == 0) return false;
+    const int bar = v.indexOf('|');
+    if (bar < 0) return false;
+    snprintf(from, fn, "%s", v.substring(0, bar).c_str());
+    snprintf(to, tn, "%s", v.substring(bar + 1).c_str());
+    return true;
+}
+
+void route_cache_put(const char *callsign, const char *from, const char *to) {
+    if (!callsign || !callsign[0]) return;
+    char key[12];
+    route_key(callsign, key, sizeof(key));
+    if (!key[0]) return;
+    Preferences p;
+    if (!p.begin("routes", false)) return;
+    int n = p.getInt("__n", 0);
+    if (n >= ROUTE_CACHE_MAX) { p.clear(); n = 0; }   // wrap to bound NVS usage
+    String v = String(from ? from : "") + "|" + String(to ? to : "");
+    if (p.putString(key, v) > 0) p.putInt("__n", n + 1);
+    p.end();
+}
 
 bool route_fetch(const char *callsign, char *from, size_t fn, char *to, size_t tn) {
     if (fn) from[0] = 0;

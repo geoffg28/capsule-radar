@@ -15,6 +15,9 @@
 #include "imu_qmi8658.h"             // face-down sleep
 #include "battery.h"                 // AXP2101 battery gauge
 #include "rtc_pcf85063.h"            // PCF85063 RTC (offline clock + date)
+#include "audio.h"                   // ES8311 alert pings
+#include <set>                       // audio: track which contacts are in range
+#include <string>
 #include <WiFiManager.h>             // captive portal
 #include <Preferences.h>            // NVS (persist theme/settings)
 #include <time.h>                   // NTP clock + night auto-dim
@@ -30,6 +33,8 @@ static AdsbClient            g_adsb;
 static RadarSettings         g_settings;
 static WiFiManager           g_wm;
 static int                   g_brightnessDay = BRIGHTNESS_DEFAULT;   // user brightness (web/NVS)
+static int                   g_volume = 60;                          // alert volume 0..100 (web/NVS)
+static bool                  g_muted  = false;                       // mute alert pings
 static volatile bool         g_onBattery = false;                    // discharging (set on core 1, read on core 0)
 static bool                  g_rtcSynced = false;                    // RTC written from NTP this session?
 static std::vector<Aircraft> g_snap;                                 // last snapshot (instant re-render on zoom)
@@ -80,9 +85,17 @@ static void adsb_task(void*) {
             char wantCall[12];
             if (route_pending(wantCall, sizeof(wantCall))) {
                 char from[40] = "", to[40] = "";
-                route_fetch(wantCall, from, sizeof(from), to, sizeof(to));
-                route_store(wantCall, from, to);   // store even if empty, so we don't refetch
-                Serial.printf("[route] %s: '%s' -> '%s'\n", wantCall, from, to);
+                if (route_cache_get(wantCall, from, sizeof(from), to, sizeof(to))) {
+                    route_store(wantCall, from, to);                       // NVS hit, no network
+                    Serial.printf("[route] %s (cache): '%s' -> '%s'\n", wantCall, from, to);
+                } else if (route_fetch(wantCall, from, sizeof(from), to, sizeof(to))) {
+                    route_store(wantCall, from, to);
+                    route_cache_put(wantCall, from, to);                  // remember across reboots
+                    Serial.printf("[route] %s (net): '%s' -> '%s'\n", wantCall, from, to);
+                } else {
+                    route_store(wantCall, from, to);   // empty -> don't refetch this session
+                    Serial.printf("[route] %s: no route\n", wantCall);
+                }
             }
         }
         vTaskDelay(pdMS_TO_TICKS(250));
@@ -96,7 +109,40 @@ static void loadSettings() {
     g_settings.homeLon = p.getDouble("homeLon", HOME_LON_DEFAULT);
     g_settings.rangeKm = p.getFloat("rangeKm", RANGE_KM_DEFAULT);
     g_brightnessDay    = p.getInt("bright", BRIGHTNESS_DEFAULT);
+    g_volume           = p.getInt("vol", 60);
+    g_muted            = p.getBool("mute", false);
     p.end();
+}
+
+// Best-effort military detection by ICAO hex prefix ("AE" = US military; extend as needed).
+static bool isMilitaryHex(const char *hex) {
+    if (!hex || !hex[0] || !hex[1]) return false;
+    const char a = hex[0] | 0x20, b = hex[1] | 0x20;
+    return a == 'a' && b == 'e';
+}
+
+// Ping when a new aircraft enters range (rate-limited) or for emergency/military (always).
+static void checkAudioEvents() {
+    if (!audio_present()) return;
+    static std::set<std::string> seen;
+    static bool first = true;
+    static uint32_t lastNew = 0;
+    std::set<std::string> now;
+    for (const Aircraft &ac : g_snap) {
+        const double d = geo::haversineKm(g_settings.homeLat, g_settings.homeLon, ac.lat, ac.lon);
+        if (d > g_settings.rangeKm) continue;                 // in-range only
+        const std::string hex = ac.hex.c_str();
+        now.insert(hex);
+        if (first || seen.count(hex)) continue;               // not new
+        if (acIsEmergency(ac.squawk) || isMilitaryHex(ac.hex.c_str())) {
+            audio_play(AUDIO_ALERT);                          // urgent: always
+        } else if (millis() - lastNew > 3000) {
+            audio_play(AUDIO_NEW);                            // new contact: rate-limited
+            lastNew = millis();
+        }
+    }
+    seen.swap(now);
+    first = false;
 }
 
 // Double-tap zoom: change the display range, persist it, and ask adsb_task to
@@ -171,7 +217,7 @@ static void handleRoot() {
         snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == th ? " selected" : "", tnames[i]);
         topts += o;
     }
-    char buf[3400];
+    char buf[4000];
     snprintf(buf, sizeof(buf),
         "<!DOCTYPE html><html><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
@@ -195,6 +241,8 @@ static void handleRoot() {
         "color:#04140b;font-weight:700;font-size:16px}button:active{opacity:.85}"
         ".w{background:#ffb23c}.card{background:rgba(10,20,14,.85);border:1px solid #1f3a2b;border-radius:14px;padding:16px;margin-bottom:14px}"
         ".ft{color:#5f7a6c;font-size:12px;text-align:center;margin-top:6px}.ft code{color:#9affc8}"
+        ".ck{width:auto;display:inline;margin-right:8px;vertical-align:middle}"
+        ".sec{background:#0c1a12!important;color:#1dff86!important;border:1px solid #2a4a39!important}"
         "</style></head><body>"
         "<div class=hd><div class=dot></div><div><h1>Capsule Radar</h1><p class=sub>Live ADS-B radar &middot; configuration</p></div></div>"
         "<div class=card><div class=t>Location &amp; range</div><form method=POST action=/save>"
@@ -205,12 +253,21 @@ static void handleRoot() {
         "<button>Save &amp; restart</button></form></div>"
         "<div class=card><div class=t>Brightness</div>"
         "<input type=range min=5 max=255 value='%d' oninput='b(this.value,0)' onchange='b(this.value,1)'></div>"
+        "<div class=card><div class=t>Sound</div>"
+        "<label>Volume</label>"
+        "<input type=range min=0 max=100 value='%d' oninput='v(this.value,0)' onchange='v(this.value,1)'>"
+        "<label><input type=checkbox class=ck %s onchange='m(this.checked)'>Mute alerts</label>"
+        "<button type=button class=sec onclick='t()'>Test ping</button></div>"
         "<div class=card><div class=t>Network</div>"
         "<p style='color:#9affc8;font-size:13px;margin:0 0 4px'>Forget the saved WiFi and reopen the setup portal.</p>"
         "<form method=POST action=/wifi><button class=w>Reset WiFi</button></form></div>"
         "<p class=ft>Reach me at <code>capsuleradar.local</code></p>"
-        "<script>function b(v,s){fetch('/bright?v='+v+(s?'&save=1':''))}</script></body></html>",
-        g_settings.homeLat, g_settings.homeLon, ropts.c_str(), topts.c_str(), g_brightnessDay);
+        "<script>function b(v,s){fetch('/bright?v='+v+(s?'&save=1':''))}"
+        "function v(x,s){fetch('/vol?v='+x+(s?'&save=1':''))}"
+        "function m(c){fetch('/vol?mute='+(c?1:0)+'&save=1')}"
+        "function t(){fetch('/vol?test=1')}</script></body></html>",
+        g_settings.homeLat, g_settings.homeLon, ropts.c_str(), topts.c_str(),
+        g_brightnessDay, g_volume, g_muted ? "checked" : "");
     g_web.send(200, "text/html", buf);
 }
 
@@ -252,6 +309,20 @@ static void handleBright() {
     g_web.send(200, "text/plain", "ok");
 }
 
+static void handleVol() {
+    if (g_web.hasArg("v"))    { g_volume = constrain((int)g_web.arg("v").toInt(), 0, 100); audio_set_volume(g_volume); }
+    if (g_web.hasArg("mute")) { g_muted = g_web.arg("mute").toInt() != 0; audio_set_muted(g_muted); }
+    if (g_web.hasArg("save")) {
+        Preferences p;
+        p.begin("capsuleradar", false);
+        p.putInt("vol", g_volume);
+        p.putBool("mute", g_muted);
+        p.end();
+    }
+    if (g_web.hasArg("test")) audio_play(AUDIO_NEW);   // by-ear check
+    g_web.send(200, "text/plain", "ok");
+}
+
 void setup() {
     Serial.begin(115200);
     delay(200);
@@ -289,6 +360,10 @@ void setup() {
     setenv("TZ", TZ_STR, 1); tzset();   // local time for display even before NTP
     rtc_begin();
     rtc_seed_clock();                   // offline clock/date from the PCF85063
+    if (audio_begin()) {                // ES8311 alert pings (no-op if codec absent)
+        audio_set_volume(g_volume);
+        audio_set_muted(g_muted);
+    }
 
     // --- Radar UI ----------------------------------------------------------
     // radar::init() runs inside display::begin() (LVGL must be up first).
@@ -330,6 +405,7 @@ void setup() {
     g_web.on("/save", HTTP_POST, handleSave);
     g_web.on("/wifi", HTTP_POST, handleWifi);
     g_web.on("/bright", handleBright);
+    g_web.on("/vol", handleVol);
     g_web.begin();
 
     Serial.println("setup done");
@@ -349,6 +425,7 @@ void loop() {
             xSemaphoreGive(g_ac_mutex);
             radar::update(g_snap, g_settings); // rebuild the glyph/trail layer
             ui_on_data_updated();              // refresh card/list/stats
+            checkAudioEvents();                // ping new-in-range / emergency / military
         }
     }
 
