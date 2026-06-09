@@ -28,6 +28,63 @@ static lv_obj_t *s_list = nullptr;
 static lv_obj_t *s_statsLbl = nullptr;
 static lv_obj_t *s_statsNet = nullptr;
 
+// --------------------------------------------------------------------- units
+// 0 = Aviation (ft, kt, km) · 1 = Metric (m, km/h, km) · 2 = Imperial (ft, mph, mi).
+// The feed gives altitude in ft, speed in kt, vertical speed in fpm, distance in km.
+static int s_units = 0;
+void ui_set_units(int u) { s_units = (u < 0 || u > 2) ? 0 : u; }
+
+static void fmt_alt(char *b, size_t n, float ft, bool gnd) {
+    if (gnd)            snprintf(b, n, "GND");
+    else if (s_units == 1) snprintf(b, n, "%.0f m",  ft * 0.3048f);
+    else                snprintf(b, n, "%.0f ft", ft);
+}
+static void fmt_spd(char *b, size_t n, float kt) {
+    if (kt != kt)          snprintf(b, n, "-");
+    else if (s_units == 1) snprintf(b, n, "%.0f km/h", kt * 1.852f);
+    else if (s_units == 2) snprintf(b, n, "%.0f mph",  kt * 1.15078f);
+    else                   snprintf(b, n, "%.0f kt",   kt);
+}
+static void fmt_vs(char *b, size_t n, float fpm) {
+    if (fpm != fpm)        snprintf(b, n, "-");
+    else if (s_units == 1) snprintf(b, n, "%+.1f m/s", fpm * 0.00508f);
+    else                   snprintf(b, n, "%+.0f fpm", fpm);
+}
+static float dist_val(float km)   { return s_units == 2 ? km * 0.621371f : km; }
+static const char *dist_unit(void){ return s_units == 2 ? "mi" : "km"; }
+
+// Fold Latin-1 accents / drop any other non-ASCII so the Montserrat font never hits a
+// missing glyph (which renders as an empty box). Belt-and-suspenders for card text.
+static void fold_ascii(char *s) {
+    char *o = s;
+    for (unsigned char *p = (unsigned char *)s; *p; ) {
+        if (*p < 0x80) { *o++ = (char)*p++; continue; }
+        if (*p == 0xC3 && p[1]) {                       // Latin-1 Supplement (U+00C0..U+00FF)
+            const unsigned char d = p[1];
+            char r;
+            if      (d >= 0x80 && d <= 0x85) r = 'A';
+            else if (d >= 0xA0 && d <= 0xA5) r = 'a';
+            else if (d == 0x87)              r = 'C';
+            else if (d == 0xA7)              r = 'c';
+            else if (d >= 0x88 && d <= 0x8B) r = 'E';
+            else if (d >= 0xA8 && d <= 0xAB) r = 'e';
+            else if (d >= 0x8C && d <= 0x8F) r = 'I';
+            else if (d >= 0xAC && d <= 0xAF) r = 'i';
+            else if (d == 0x91)              r = 'N';
+            else if (d == 0xB1)              r = 'n';
+            else if (d >= 0x92 && d <= 0x96) r = 'O';
+            else if (d >= 0xB2 && d <= 0xB6) r = 'o';
+            else if (d >= 0x99 && d <= 0x9C) r = 'U';
+            else if (d >= 0xB9 && d <= 0xBC) r = 'u';
+            else                             r = '?';
+            *o++ = r; p += 2; continue;
+        }
+        ++p;                                            // skip other multibyte lead + continuation
+        while (*p >= 0x80 && *p < 0xC0) ++p;
+    }
+    *o = 0;
+}
+
 // ----------------------------------------------------------------- detail card
 static void refresh_card(void) {
     AcInfo in;
@@ -43,21 +100,19 @@ static void refresh_card(void) {
     char title[40];
     if (in.type[0]) snprintf(title, sizeof(title), "%s  %s", in.call[0] ? in.call : "-", in.type);
     else            snprintf(title, sizeof(title), "%s", in.call[0] ? in.call : "-");
+    fold_ascii(title);
     lv_label_set_text(s_cardTitle, title);
     lv_obj_set_style_text_color(s_cardTitle, in.emergency ? UI_EMERG : UI_INK, 0);
 
-    char altS[16], vsS[16], spdS[16], sqS[16];
-    if (in.onGround)            snprintf(altS, sizeof(altS), "GND");
-    else                        snprintf(altS, sizeof(altS), "%.0f ft", in.altFt);
-    if (in.vsFpm != in.vsFpm)   snprintf(vsS, sizeof(vsS), "-");
-    else                        snprintf(vsS, sizeof(vsS), "%+.0f", in.vsFpm);
-    if (in.gsKt != in.gsKt)     snprintf(spdS, sizeof(spdS), "-");
-    else                        snprintf(spdS, sizeof(spdS), "%.0f kt", in.gsKt);
+    char altS[16], vsS[24], spdS[16], sqS[16];
+    fmt_alt(altS, sizeof(altS), in.altFt, in.onGround);
+    fmt_vs (vsS,  sizeof(vsS),  in.vsFpm);
+    fmt_spd(spdS, sizeof(spdS), in.gsKt);
     if (in.squawk < 0)          snprintf(sqS, sizeof(sqS), "-");
     else                        snprintf(sqS, sizeof(sqS), "%04d", in.squawk);
 
     char left[96], right[96];
-    snprintf(left,  sizeof(left),  "ALT  %s\nSPD  %s\nDIST %.1f km", altS, spdS, in.distKm);
+    snprintf(left,  sizeof(left),  "ALT  %s\nSPD  %s\nDIST %.1f %s", altS, spdS, dist_val(in.distKm), dist_unit());
     snprintf(right, sizeof(right), "V/S  %s\nHDG  %03.0f\nSQK  %s", vsS, in.bearingDeg, sqS);
     lv_label_set_text(s_cardL, left);
     lv_label_set_text(s_cardR, right);
@@ -74,6 +129,7 @@ static void refresh_card(void) {
         char rt[96];
         if (rfrom[0] || rto[0]) snprintf(rt, sizeof(rt), "%s -> %s", rfrom[0] ? rfrom : "?", rto[0] ? rto : "?");
         else                    snprintf(rt, sizeof(rt), "Route unavailable");
+        fold_ascii(rt);
         lv_label_set_text(s_cardRoute, rt);
     } else {
         lv_label_set_text(s_cardRoute, "Looking up route...");     // pending: lookup in flight
@@ -114,6 +170,7 @@ static void refresh_card(void) {
 // --------------------------------------------------------------------- input
 static bool s_longPressed = false;
 static int s_rangeIdx = -1;
+static float s_rangeKm = RANGE_KM_DEFAULT;   // current display range (km), for the stats view
 static void (*s_rangeCb)(float) = nullptr;
 static lv_obj_t *s_zoomBtn = nullptr, *s_zoomLbl = nullptr;
 
@@ -132,9 +189,10 @@ static void zoom_cb(lv_event_t *e) {   // fires on PRESS (robust vs scroll-cance
 }
 
 void ui_set_range_km(float km) {
+    s_rangeKm = km;
     if (s_zoomLbl) {
-        char b[16];
-        snprintf(b, sizeof(b), LV_SYMBOL_LOOP " %.0f km", (double)km);
+        char b[20];
+        snprintf(b, sizeof(b), LV_SYMBOL_LOOP " %.0f %s", dist_val(km), dist_unit());
         lv_label_set_text(s_zoomLbl, b);
     }
     int best = 0; float bd = 1e9f;                 // sync the cycle index to the shown range
@@ -209,9 +267,10 @@ static void build_list(void) {
     for (int i = 0; i < n; ++i) {
         AcInfo in;
         radar::info(i, in);
-        char txt[56];
-        snprintf(txt, sizeof(txt), "%-8.8s  %5.0f ft  %4.1f km",
-                 in.call[0] ? in.call : in.hex, in.onGround ? 0.0f : in.altFt, in.distKm);
+        char altS[16], txt[64];
+        fmt_alt(altS, sizeof(altS), in.altFt, in.onGround);
+        snprintf(txt, sizeof(txt), "%-8.8s  %-8s %4.1f %s",
+                 in.call[0] ? in.call : in.hex, altS, dist_val(in.distKm), dist_unit());
         lv_obj_t *b = lv_list_add_btn(s_list, NULL, txt);
         lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, 0);
         lv_obj_set_style_text_color(b, in.emergency ? UI_EMERG : UI_SOFT, 0);
@@ -234,16 +293,18 @@ static void build_stats(void) {
         if (in.distKm < nearest) { nearest = in.distKm; snprintf(nearestCall, sizeof(nearestCall), "%s", in.call[0] ? in.call : in.hex); }
         if (!in.onGround && in.altFt > highest) highest = in.altFt;
     }
-    char st[200];
+    char altH[16];
+    fmt_alt(altH, sizeof(altH), (highest > -1e8f) ? highest : 0.0f, false);
+    char st[220];
     snprintf(st, sizeof(st),
              "Aircraft   %d\n"
              "Emergency  %d\n"
              "Nearest    %s\n"
-             "           %.1f km\n"
-             "Highest    %.0f ft\n"
-             "Range      %.0f km",
-             n, emg, n ? nearestCall : "-", n ? nearest : 0.0f,
-             (highest > -1e8f) ? highest : 0.0f, (double)RANGE_KM_DEFAULT);
+             "           %.1f %s\n"
+             "Highest    %s\n"
+             "Range      %.0f %s",
+             n, emg, n ? nearestCall : "-", dist_val(n ? nearest : 0.0f), dist_unit(),
+             altH, dist_val(s_rangeKm), dist_unit());
     lv_label_set_text(s_statsLbl, st);
 }
 

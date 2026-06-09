@@ -7,6 +7,7 @@
 #include "config.h"
 #include "geo.h"
 #include "coastline.h"
+#include "airports.h"
 #include <lvgl.h>
 #include <math.h>
 #include <stdio.h>
@@ -35,6 +36,8 @@
 // coastline outline — steel blue, deliberately off the red/amber/lime/green/cyan
 // altitude-trail palette so land never reads as an aircraft track.
 #define COAST_COLOR lv_color_hex(0x4E86C6)
+// airport markers — a neutral muted grey-blue so they sit quietly under the traffic.
+#define AIRPORT_COLOR lv_color_hex(0x8A93A6)
 // ---- dragon palette (DBZ) ----
 #define DRG_BLIP   lv_color_hex(0xFFE11A)
 #define DRG_EMERG  lv_color_hex(0xFF4D2E)
@@ -78,6 +81,7 @@ static lv_obj_t  *s_pulse     = nullptr;
 static lv_obj_t  *s_rangeLbl  = nullptr;
 static bool       s_rangeLblVisible = true;
 static bool       s_sweepEnabled    = true;
+static bool       s_airportsEnabled = true;
 static lv_timer_t *s_timer    = nullptr;
 static float       s_sweepDeg = 0.0f;
 static float       s_prevSweepDeg = 0.0f;
@@ -201,6 +205,7 @@ static void grid_draw_cb(lv_event_t *e) {
         td.border_width = 1;
         td.border_opa = 160;
         coastline_draw(d, COAST_COLOR, 170, 2);    // landmass outline under the triangle
+        if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, 150);
         lv_draw_polygon(d, &td, tri, 3);
         return;
     }
@@ -208,6 +213,7 @@ static void grid_draw_cb(lv_event_t *e) {
     // coastline first, so the rings/crosshair sit cleanly on top of it.
     // Steel blue + 2 px so it reads as a map outline, distinct from the green altitude trails.
     coastline_draw(d, COAST_COLOR, 165, 2);
+    if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, 150);
 
     // phosphor: concentric rings + crosshair
     lv_draw_arc_dsc_t ad;
@@ -587,6 +593,12 @@ void setSweepEnabled(bool on) {
 }
 bool sweepEnabled() { return s_sweepEnabled; }
 
+void setAirportsEnabled(bool on) {
+    s_airportsEnabled = on;
+    if (s_gridLayer) lv_obj_invalidate(s_gridLayer);   // repaint the chrome with/without markers
+}
+bool airportsEnabled() { return s_airportsEnabled; }
+
 void init(void *lv_parent) {
     lv_obj_t *parent = (lv_obj_t *)lv_parent;
     s_parent = parent;
@@ -677,6 +689,7 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
         const bool firstFix = (s_coRange < 0.0f);
         s_coLat = s.homeLat; s_coLon = s.homeLon; s_coRange = s.rangeKm;
         coastline_project(s.homeLat, s.homeLon, s.rangeKm, s_cx, s_cy, R);
+        airports_project(s.homeLat, s.homeLon, s.rangeKm, s_cx, s_cy, R);
         if (s_gridLayer) lv_obj_invalidate(s_gridLayer);
         if (!firstFix) {
             // Scope scale/center changed: old trails were plotted at the previous

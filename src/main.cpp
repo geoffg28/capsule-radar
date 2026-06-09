@@ -41,6 +41,8 @@ static int                   g_volume = 60;                          // alert vo
 static bool                  g_muted  = false;                       // mute alert pings
 static uint32_t              g_idleDimMs = IDLE_DIM_MS;              // dim after this idle time (0 = never)
 static bool                  g_showSweep = true;                     // rotating sweep line on/off (web/NVS)
+static int                   g_units = 0;                            // 0=Aviation 1=Metric 2=Imperial (web/NVS)
+static bool                  g_showAirports = true;                  // airport markers on/off (web/NVS)
 static volatile bool         g_onBattery = false;                    // discharging (set on core 1, read on core 0)
 static bool                  g_rtcSynced = false;                    // RTC written from NTP this session?
 static std::vector<Aircraft> g_snap;                                 // last snapshot (instant re-render on zoom)
@@ -82,7 +84,13 @@ static void adsb_task(void*) {
             if (lastPoll == 0 || nowMs - lastPoll >= pollInterval) {  // aircraft feed
                 lastPoll = nowMs;
                 static int failCount = 0;
-                if (g_adsb.poll(fresh)) {
+                // The free APIs drop the odd request. poll() flips to the alternate host on
+                // failure, so an immediate second attempt hits the other host — only a genuine
+                // both-hosts outage counts as a miss, which keeps the WiFi HUD from flicking
+                // amber on transient hiccups.
+                bool ok = g_adsb.poll(fresh);
+                if (!ok) ok = g_adsb.poll(fresh);
+                if (ok) {
                     Serial.printf("[adsb] fetched %u aircraft\n", (unsigned)fresh.size());
                     failCount = 0;
                     g_feedOk = true;
@@ -93,8 +101,8 @@ static void adsb_task(void*) {
                         xSemaphoreGive(g_ac_mutex);
                     }
                 } else {
-                    Serial.println("[adsb] poll failed (fetch or parse)");
-                    if (++failCount >= 3) g_feedOk = false;   // several misses -> HUD warning
+                    Serial.println("[adsb] poll failed (both hosts)");
+                    if (++failCount >= 3) g_feedOk = false;   // sustained outage -> HUD warning
                 }
             }
             // on-demand route lookup for the selected aircraft (checked often, fetched once)
@@ -131,6 +139,7 @@ static void loadSettings() {
     g_volume           = p.getInt("vol", 60);
     g_muted            = p.getBool("mute", false);
     g_idleDimMs        = p.getUInt("idledim", IDLE_DIM_MS);
+    g_units            = p.getInt("units", 0);
     p.end();
 }
 
@@ -241,7 +250,14 @@ static void handleRoot() {
         iopts += o;
     }
     { char o[64]; snprintf(o, sizeof(o), "<option value=0%s>Never</option>", curIdle == 0 ? " selected" : ""); iopts += o; }
-    static char buf[6500];   // static (not on the 8 KB loop-task stack) to avoid overflow
+    const char *unames[] = {"Aviation (ft, kt, km)", "Metric (m, km/h, km)", "Imperial (ft, mph, mi)"};
+    String uopts;
+    for (int i = 0; i < 3; ++i) {
+        char o[96];
+        snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_units ? " selected" : "", unames[i]);
+        uopts += o;
+    }
+    static char buf[7200];   // static (not on the 8 KB loop-task stack) to avoid overflow
     snprintf(buf, sizeof(buf),
         "<!DOCTYPE html><html><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
@@ -285,7 +301,9 @@ static void handleRoot() {
         "<label>Brightness</label>"
         "<input type=range min=5 max=255 value='%d' oninput='b(this.value,0)' onchange='b(this.value,1)'>"
         "<label>Dim screen after</label><select onchange='d(this.value)'>%s</select>"
-        "<label><input type=checkbox class=ck %s onchange='sw(this.checked)'>Show radar sweep</label></div>"
+        "<label><input type=checkbox class=ck %s onchange='sw(this.checked)'>Show radar sweep</label>"
+        "<label><input type=checkbox class=ck %s onchange='ap(this.checked)'>Show airports</label>"
+        "<label>Units</label><select onchange='u(this.value)'>%s</select></div>"
         "<div class=card><div class=t>Sound</div>"
         "<label>Volume</label>"
         "<input type=range min=0 max=100 value='%d' oninput='v(this.value,0)' onchange='v(this.value,1)'>"
@@ -308,9 +326,12 @@ static void handleRoot() {
         "function m(c){fetch('/vol?mute='+(c?1:0)+'&save=1')}"
         "function t(){fetch('/vol?test=1')}"
         "function d(v){fetch('/idle?v='+v+'&save=1')}"
-        "function sw(c){fetch('/sweep?v='+(c?1:0)+'&save=1')}</script></body></html>",
+        "function sw(c){fetch('/sweep?v='+(c?1:0)+'&save=1')}"
+        "function ap(c){fetch('/airports?v='+(c?1:0)+'&save=1')}"
+        "function u(v){fetch('/units?v='+v+'&save=1')}</script></body></html>",
         g_settings.homeLat, g_settings.homeLon, ropts.c_str(), topts.c_str(),
         g_brightnessDay, iopts.c_str(), g_showSweep ? "checked" : "",
+        g_showAirports ? "checked" : "", uopts.c_str(),
         g_volume, g_muted ? "checked" : "",
         g_settings.homeLat, g_settings.homeLon);
     g_web.send(200, "text/html", buf);
@@ -392,6 +413,22 @@ static void handleIdle() {   // idle auto-dim timeout (seconds; 0 = never)
     g_web.send(200, "text/plain", "ok");
 }
 
+static void handleUnits() {   // measurement units preset (live re-render)
+    if (g_web.hasArg("v")) {
+        g_units = constrain((int)g_web.arg("v").toInt(), 0, 2);
+        ui_set_units(g_units);
+        ui_set_range_km(g_settings.rangeKm);   // refresh the zoom-button label
+        ui_on_data_updated();                  // re-render card/list/stats in the new units
+        if (g_web.hasArg("save")) {
+            Preferences p;
+            p.begin("capsuleradar", false);
+            p.putInt("units", g_units);
+            p.end();
+        }
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
 static void handleSweep() {   // show/hide the rotating sweep line (live)
     if (g_web.hasArg("v")) {
         g_showSweep = g_web.arg("v").toInt() != 0;
@@ -400,6 +437,20 @@ static void handleSweep() {   // show/hide the rotating sweep line (live)
             Preferences p;
             p.begin("capsuleradar", false);
             p.putBool("sweep", g_showSweep);
+            p.end();
+        }
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
+static void handleAirports() {   // show/hide airport markers (live)
+    if (g_web.hasArg("v")) {
+        g_showAirports = g_web.arg("v").toInt() != 0;
+        radar::setAirportsEnabled(g_showAirports);
+        if (g_web.hasArg("save")) {
+            Preferences p;
+            p.begin("capsuleradar", false);
+            p.putBool("airports", g_showAirports);
             p.end();
         }
     }
@@ -477,12 +528,15 @@ void setup() {
         p.begin("capsuleradar", true);
         const int t = p.getInt("theme", THEME_PHOSPHOR);
         g_showSweep = p.getBool("sweep", true);
+        g_showAirports = p.getBool("airports", true);
         p.end();
         radar::setTheme(t);
         radar::setSweepEnabled(g_showSweep);
+        radar::setAirportsEnabled(g_showAirports);
     }
     radar::setThemeChangedCb(saveTheme);
     ui_set_range_cb(onRangeChange);              // on-screen zoom button
+    ui_set_units(g_units);                       // apply saved unit preset
     ui_set_range_km(g_settings.rangeKm);         // show the loaded range
 
     imu_begin();       // face-down sleep (no-op if the IMU isn't detected)
@@ -540,6 +594,8 @@ void setup() {
     g_web.on("/vol", handleVol);
     g_web.on("/idle", handleIdle);
     g_web.on("/sweep", handleSweep);
+    g_web.on("/airports", handleAirports);
+    g_web.on("/units", handleUnits);
     g_web.on("/update", HTTP_GET, handleUpdatePage);
     g_web.on("/update", HTTP_POST,
         []() {

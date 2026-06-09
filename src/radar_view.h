@@ -66,5 +66,7 @@ void setThemeChangedCb(void (*cb)(int theme));   // called when the theme change
 void setRangeLabelVisible(bool v);               // hide the built-in range label (UI shows its own)
 void setSweepEnabled(bool on);                   // show/hide the rotating sweep line
 bool sweepEnabled();
+void setAirportsEnabled(bool on);                // show/hide airport markers on the scope
+bool airportsEnabled();
 
 } // namespace radar
