@@ -43,6 +43,7 @@ static uint32_t              g_idleDimMs = IDLE_DIM_MS;              // dim afte
 static bool                  g_showSweep = true;                     // rotating sweep line on/off (web/NVS)
 static int                   g_units = 0;                            // 0=Aviation 1=Metric 2=Imperial (web/NVS)
 static bool                  g_showAirports = true;                  // airport markers on/off (web/NVS)
+static int                   g_rotation = 0;                         // display rotation 0/1/2/3 = 0/90/180/270 (web/NVS)
 static volatile bool         g_onBattery = false;                    // discharging (set on core 1, read on core 0)
 static bool                  g_rtcSynced = false;                    // RTC written from NTP this session?
 static std::vector<Aircraft> g_snap;                                 // last snapshot (instant re-render on zoom)
@@ -50,6 +51,7 @@ static volatile bool         g_requery = false;                      // range ch
 static float                 g_requeryKm = 0.0f;
 static volatile bool         g_feedOk = true;                        // ADS-B feed healthy? (HUD warning)
 static volatile uint32_t     g_lastFeedOkMs = 0;                     // millis() of the last good poll (HUD staleness)
+static volatile uint32_t     g_rebootAtMs = 0;                       // !=0: reboot when millis() reaches it (clean start after WiFi config)
 
 // ---- networking task (core 0): fetch + parse, never touches the display ----
 static void adsb_task(void*) {
@@ -259,7 +261,14 @@ static void handleRoot() {
         snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_units ? " selected" : "", unames[i]);
         uopts += o;
     }
-    static char buf[7200];   // static (not on the 8 KB loop-task stack) to avoid overflow
+    const char *rnames[] = {"0\xc2\xb0 (default)", "90\xc2\xb0", "180\xc2\xb0", "270\xc2\xb0"};
+    String rotopts;
+    for (int i = 0; i < 4; ++i) {
+        char o[64];
+        snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_rotation ? " selected" : "", rnames[i]);
+        rotopts += o;
+    }
+    static char buf[7800];   // static (not on the 8 KB loop-task stack) to avoid overflow
     snprintf(buf, sizeof(buf),
         "<!DOCTYPE html><html><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
@@ -305,6 +314,7 @@ static void handleRoot() {
         "<label>Dim screen after</label><select onchange='d(this.value)'>%s</select>"
         "<label><input type=checkbox class=ck %s onchange='sw(this.checked)'>Show radar sweep</label>"
         "<label><input type=checkbox class=ck %s onchange='ap(this.checked)'>Show airports</label>"
+        "<label>Screen rotation (USB-C position)</label><select onchange='ro(this.value)'>%s</select>"
         "<label>Units</label><select onchange='u(this.value)'>%s</select></div>"
         "<div class=card><div class=t>Sound</div>"
         "<label>Volume</label>"
@@ -330,10 +340,11 @@ static void handleRoot() {
         "function d(v){fetch('/idle?v='+v+'&save=1')}"
         "function sw(c){fetch('/sweep?v='+(c?1:0)+'&save=1')}"
         "function ap(c){fetch('/airports?v='+(c?1:0)+'&save=1')}"
+        "function ro(v){fetch('/rotate?v='+v+'&save=1')}"
         "function u(v){fetch('/units?v='+v+'&save=1')}</script></body></html>",
         g_settings.homeLat, g_settings.homeLon, ropts.c_str(), topts.c_str(),
         g_brightnessDay, iopts.c_str(), g_showSweep ? "checked" : "",
-        g_showAirports ? "checked" : "", uopts.c_str(),
+        g_showAirports ? "checked" : "", rotopts.c_str(), uopts.c_str(),
         g_volume, g_muted ? "checked" : "",
         g_settings.homeLat, g_settings.homeLon);
     g_web.send(200, "text/html", buf);
@@ -459,6 +470,20 @@ static void handleAirports() {   // show/hide airport markers (live)
     g_web.send(200, "text/plain", "ok");
 }
 
+static void handleRotate() {   // display rotation 0/90/180/270 for any USB-C orientation (live)
+    if (g_web.hasArg("v")) {
+        g_rotation = constrain((int)g_web.arg("v").toInt(), 0, 3);
+        display::setRotation((uint8_t)g_rotation);
+        if (g_web.hasArg("save")) {
+            Preferences p;
+            p.begin("capsuleradar", false);
+            p.putInt("rot", g_rotation);
+            p.end();
+        }
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
 // ---- browser OTA: upload an app .bin over WiFi and self-flash ----
 static void handleUpdatePage() {
     g_web.send(200, "text/html",
@@ -531,10 +556,12 @@ void setup() {
         const int t = p.getInt("theme", THEME_PHOSPHOR);
         g_showSweep = p.getBool("sweep", true);
         g_showAirports = p.getBool("airports", true);
+        g_rotation = p.getInt("rot", 0);
         p.end();
         radar::setTheme(t);
         radar::setSweepEnabled(g_showSweep);
         radar::setAirportsEnabled(g_showAirports);
+        display::setRotation((uint8_t)g_rotation);
     }
     radar::setThemeChangedCb(saveTheme);
     ui_set_range_cb(onRangeChange);              // on-screen zoom button
@@ -572,6 +599,13 @@ void setup() {
         "border:1px solid #2a4a39!important;border-radius:8px!important}"
         "a{color:#1dff86}.q{filter:hue-rotate(90deg)}"
         "</style>");
+    // After the portal saves new credentials, reboot for a clean start: WiFiManager's
+    // own port-80 server (and mDNS) don't cleanly hand over to our web server / STA
+    // interface in non-blocking mode, so the config page is flaky until a fresh boot.
+    g_wm.setSaveConfigCallback([]() {
+        Serial.println("[wifi] new credentials saved -> rebooting for a clean web/mDNS start");
+        g_rebootAtMs = millis() + 2500;   // let the portal deliver its 'saved' page first
+    });
     if (g_wm.autoConnect("CapsuleRadar-Setup"))
         Serial.println("[wifi] connected");
     else
@@ -597,6 +631,7 @@ void setup() {
     g_web.on("/idle", handleIdle);
     g_web.on("/sweep", handleSweep);
     g_web.on("/airports", handleAirports);
+    g_web.on("/rotate", handleRotate);
     g_web.on("/units", handleUnits);
     g_web.on("/update", HTTP_GET, handleUpdatePage);
     g_web.on("/update", HTTP_POST,
@@ -616,6 +651,9 @@ void loop() {
     display::loop();                // drive LVGL (render dirty areas + run timers)
     g_wm.process();                 // service the WiFi config portal (non-blocking)
     g_web.handleClient();           // serve the configuration web page
+
+    // scheduled reboot after a fresh WiFi config (see setSaveConfigCallback)
+    if (g_rebootAtMs && (int32_t)(millis() - g_rebootAtMs) >= 0) { delay(50); ESP.restart(); }
 
     // OTA: set up once WiFi is up, then service it every loop (flash over the air)
     static bool otaUp = false;

@@ -31,14 +31,52 @@ static lv_color_t        *s_buf2 = nullptr;
 static volatile uint32_t s_frameCount = 0;   // rendered frames (last-flush), for FPS measurement
 uint32_t display_frames() { return s_frameCount; }
 
-// LVGL -> panel. Push the rendered area straight to the CO5300.
+static volatile uint8_t s_rot = 0;           // display rotation: 0/1/2/3 = 0°/90°/180°/270°
+static lv_color_t *s_rotBuf = nullptr;       // PSRAM scratch for 90/270° transpose (see begin())
+
+// LVGL -> panel, applying the chosen rotation while pushing.
+//   0°   : straight through.
+//   180° : reverse the flat block in place — no scratch buffer.
+//   90°/270° : the block transposes (w<->h), so it can't be reversed in place; copy it
+//              rotated into a PSRAM scratch buffer. That buffer MUST live in PSRAM — an
+//              internal-RAM one starves the mbedTLS handshake and kills the ADS-B feed.
 static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) {
-    const uint32_t w = (area->x2 - area->x1 + 1);
-    const uint32_t h = (area->y2 - area->y1 + 1);
+    const int w = (int)(area->x2 - area->x1 + 1);
+    const int h = (int)(area->y2 - area->y1 + 1);
+    lv_color_t *out = px;
+    int16_t  dx = area->x1, dy = area->y1;
+    uint16_t dw = (uint16_t)w, dh = (uint16_t)h;
+
+    switch (s_rot) {
+        case 2:  // 180°
+            for (int i = 0, j = w * h - 1; i < j; ++i, --j) { lv_color_t t = px[i]; px[i] = px[j]; px[j] = t; }
+            dx = (int16_t)(SCREEN_W - 1 - area->x2);
+            dy = (int16_t)(SCREEN_H - 1 - area->y2);
+            break;
+        case 1:  // 90° CW
+            if (s_rotBuf) {
+                for (int j = 0; j < h; ++j)
+                    for (int i = 0; i < w; ++i)
+                        s_rotBuf[i * h + (h - 1 - j)] = px[j * w + i];
+                out = s_rotBuf; dw = (uint16_t)h; dh = (uint16_t)w;
+                dx = (int16_t)(SCREEN_H - 1 - area->y2); dy = area->x1;
+            }
+            break;
+        case 3:  // 270° CW
+            if (s_rotBuf) {
+                for (int j = 0; j < h; ++j)
+                    for (int i = 0; i < w; ++i)
+                        s_rotBuf[(w - 1 - i) * h + j] = px[j * w + i];
+                out = s_rotBuf; dw = (uint16_t)h; dh = (uint16_t)w;
+                dx = area->y1; dy = (int16_t)(SCREEN_W - 1 - area->x2);
+            }
+            break;
+        default: break;  // 0°
+    }
 #if (LV_COLOR_16_SWAP != 0)
-    s_gfx->draw16bitBeRGBBitmap(area->x1, area->y1, (uint16_t *)px, w, h);
+    s_gfx->draw16bitBeRGBBitmap(dx, dy, (uint16_t *)out, dw, dh);
 #else
-    s_gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)px, w, h);
+    s_gfx->draw16bitRGBBitmap(dx, dy, (uint16_t *)out, dw, dh);
 #endif
     if (lv_disp_flush_is_last(drv)) s_frameCount++;
     lv_disp_flush_ready(drv);
@@ -59,8 +97,15 @@ static void touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
     (void)drv;
     uint16_t x, y;
     if (touch_read(&x, &y)) {
-        data->point.x = (lv_coord_t)x;
-        data->point.y = (lv_coord_t)y;
+        uint16_t lx = x, ly = y;                          // map physical touch -> logical (inverse rotation)
+        switch (s_rot) {
+            case 1: lx = y;                            ly = (uint16_t)(SCREEN_H - 1 - x); break;
+            case 2: lx = (uint16_t)(SCREEN_W - 1 - x); ly = (uint16_t)(SCREEN_H - 1 - y); break;
+            case 3: lx = (uint16_t)(SCREEN_W - 1 - y); ly = x;                            break;
+            default: break;
+        }
+        data->point.x = (lv_coord_t)lx;
+        data->point.y = (lv_coord_t)ly;
         data->state = LV_INDEV_STATE_PRESSED;
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
@@ -98,6 +143,12 @@ bool begin() {
     }
     lv_disp_draw_buf_init(&s_draw_buf, s_buf1, s_buf2, buf_px);
 
+    // Scratch target for 90/270° rotation (the block transposes, so it can't rotate in
+    // place). Deliberately in PSRAM: an internal-RAM buffer here would eat the contiguous
+    // block the TLS handshake needs and break the ADS-B feed. NULL is fine (rotation just
+    // falls back to un-rotated for 90/270° if PSRAM is exhausted).
+    s_rotBuf = (lv_color_t *)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+
     lv_disp_drv_init(&s_disp_drv);
     s_disp_drv.hor_res  = SCREEN_W;
     s_disp_drv.ver_res  = SCREEN_H;
@@ -124,6 +175,13 @@ bool begin() {
 void loop() { lv_timer_handler(); }
 
 void setBrightness(uint8_t v) { if (s_gfx) s_gfx->setBrightness(v); }
+
+void setRotation(uint8_t quarters) {
+    s_rot = (uint8_t)(quarters & 3);   // 0..3 = 0°/90°/180°/270°
+    lv_obj_t *scr = lv_scr_act();
+    if (scr) lv_obj_invalidate(scr);   // full repaint in the new orientation
+}
+uint8_t rotation() { return s_rot; }
 
 uint32_t inactiveMs() { return lv_disp_get_inactive_time(NULL); }
 
