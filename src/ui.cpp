@@ -518,8 +518,9 @@ void ui_create(void) {
 
     // on-screen range/zoom button (reliable single tap; bottom, above the 'S' marker)
     s_zoomBtn = lv_btn_create(s_tileRadar);
-    lv_obj_set_size(s_zoomBtn, 104, 36);
-    lv_obj_align(s_zoomBtn, LV_ALIGN_BOTTOM_MID, 0, -34);
+    lv_obj_set_size(s_zoomBtn, 120, 44);
+    lv_obj_set_ext_click_area(s_zoomBtn, 18);   // invisibly enlarge the tap target (easier to hit)
+    lv_obj_align(s_zoomBtn, LV_ALIGN_BOTTOM_MID, 0, -32);
     lv_obj_set_style_radius(s_zoomBtn, 18, 0);
     lv_obj_set_style_bg_color(s_zoomBtn, UI_PANEL, 0);
     lv_obj_set_style_bg_opa(s_zoomBtn, 225, 0);

@@ -82,6 +82,8 @@ static lv_obj_t  *s_rangeLbl  = nullptr;
 static bool       s_rangeLblVisible = true;
 static bool       s_sweepEnabled    = true;
 static bool       s_airportsEnabled = true;
+static int        s_trailMax        = TRAIL_MAX;   // per-aircraft trail length (0 = off)
+static int        s_flowMax         = FLOW_MAX;    // persistent flow-layer segments (0 = off)
 static lv_timer_t *s_timer    = nullptr;
 static float       s_sweepDeg = 0.0f;
 static float       s_prevSweepDeg = 0.0f;
@@ -599,6 +601,21 @@ void setAirportsEnabled(bool on) {
 }
 bool airportsEnabled() { return s_airportsEnabled; }
 
+// 0 = off, 1 = short, 2 = medium (default), 3 = long. Controls both the per-aircraft
+// trail and the persistent flow layer (the long-lived "where everything has been" tracks).
+void setTrailLength(int level) {
+    switch (level) {
+        case 0: s_trailMax = 0;  s_flowMax = 0;    break;
+        case 1: s_trailMax = 3;  s_flowMax = 150;  break;
+        case 3: s_trailMax = 12; s_flowMax = 1500; break;
+        default: s_trailMax = 7; s_flowMax = 700;  break;
+    }
+    if (s_flowMax == 0) { s_flow.clear(); s_trails.clear(); }
+    else while ((int)s_flow.size() > s_flowMax) s_flow.pop_front();
+    flow_redraw_all();                              // repaint the flow canvas at the new length
+    if (s_acLayer) lv_obj_invalidate(s_acLayer);
+}
+
 void init(void *lv_parent) {
     lv_obj_t *parent = (lv_obj_t *)lv_parent;
     s_parent = parent;
@@ -752,14 +769,18 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
                                abs((int)hist.back().x - (int)target.x) > 0 ||
                                abs((int)hist.back().y - (int)target.y) > 0;
             if (moved) {
-                if (!hist.empty()) {
+                if (s_flowMax > 0 && !hist.empty()) {
                     FlowSeg seg = { hist.back(), target };
                     s_flow.push_back(seg);
-                    if ((int)s_flow.size() > FLOW_MAX) s_flow.pop_front();
+                    while ((int)s_flow.size() > s_flowMax) s_flow.pop_front();
                     flow_draw_seg(seg);
                 }
-                hist.push_back(target);
-                if ((int)hist.size() > TRAIL_MAX) hist.erase(hist.begin());
+                if (s_trailMax > 0) {
+                    hist.push_back(target);
+                    while ((int)hist.size() > s_trailMax) hist.erase(hist.begin());
+                } else {
+                    hist.clear();
+                }
             }
             d.trail = hist;
         }

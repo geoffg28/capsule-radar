@@ -48,6 +48,7 @@ static int                   g_units = 0;                            // 0=Aviati
 static bool                  g_showAirports = true;                  // airport markers on/off (web/NVS)
 static int                   g_rotation = 0;                         // display rotation 0/1/2/3 = 0/90/180/270 (web/NVS)
 static bool                  g_useGps = false;                       // auto-set home from the LC76G GPS (-G variant) (web/NVS)
+static int                   g_trailLen = 2;                         // aircraft trails 0=off 1=short 2=med 3=long (web/NVS)
 static volatile bool         g_onBattery = false;                    // discharging (set on core 1, read on core 0)
 static bool                  g_rtcSynced = false;                    // RTC written from NTP this session?
 static std::vector<Aircraft> g_snap;                                 // last snapshot (instant re-render on zoom)
@@ -149,6 +150,7 @@ static void loadSettings() {
     g_alertMode        = p.getInt("alertmode", 2);
     g_proximityKm      = p.getFloat("proxkm", 0.0f);
     g_useGps           = p.getBool("usegps", false);
+    g_trailLen         = p.getInt("traillen", 2);
     g_idleDimMs        = p.getUInt("idledim", IDLE_DIM_MS);
     g_units            = p.getInt("units", 0);
     p.end();
@@ -292,6 +294,13 @@ static void handleRoot() {
         snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_rotation ? " selected" : "", rnames[i]);
         rotopts += o;
     }
+    const char *tlnames[] = {"Off", "Short", "Medium", "Long"};
+    String tlopts;
+    for (int i = 0; i < 4; ++i) {
+        char o[64];
+        snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_trailLen ? " selected" : "", tlnames[i]);
+        tlopts += o;
+    }
     const char *anames[] = {"Off", "Emergencies only", "New aircraft + emergencies"};
     String aopts;
     for (int i = 0; i < 3; ++i) {
@@ -317,7 +326,7 @@ static void handleRoot() {
         gpsRow += g_useGps ? "checked" : "";
         gpsRow += " onchange='gp(this.checked)'>Use GPS for location</label>";
     }
-    static char buf[8200];   // static (not on the 8 KB loop-task stack) to avoid overflow
+    static char buf[8400];   // static (not on the 8 KB loop-task stack) to avoid overflow
     snprintf(buf, sizeof(buf),
         "<!DOCTYPE html><html><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
@@ -364,6 +373,7 @@ static void handleRoot() {
         "<label>Dim screen after</label><select onchange='d(this.value)'>%s</select>"
         "<label><input type=checkbox class=ck %s onchange='sw(this.checked)'>Show radar sweep</label>"
         "<label><input type=checkbox class=ck %s onchange='ap(this.checked)'>Show airports</label>"
+        "<label>Aircraft trails</label><select onchange='tl(this.value)'>%s</select>"
         "<label>Screen rotation (USB-C position)</label><select onchange='ro(this.value)'>%s</select>"
         "<label>Units</label><select onchange='u(this.value)'>%s</select></div>"
         "<div class=card><div class=t>Sound</div>"
@@ -392,6 +402,7 @@ static void handleRoot() {
         "function d(v){fetch('/idle?v='+v+'&save=1')}"
         "function sw(c){fetch('/sweep?v='+(c?1:0)+'&save=1')}"
         "function ap(c){fetch('/airports?v='+(c?1:0)+'&save=1')}"
+        "function tl(v){fetch('/trail?v='+v+'&save=1')}"
         "function ro(v){fetch('/rotate?v='+v+'&save=1')}"
         "function u(v){fetch('/units?v='+v+'&save=1')}"
         "function al(v){fetch('/alerts?mode='+v+'&save=1')}"
@@ -399,7 +410,7 @@ static void handleRoot() {
         "function gp(c){fetch('/gps?v='+(c?1:0)+'&save=1')}</script></body></html>",
         g_settings.homeLat, g_settings.homeLon, gpsRow.c_str(), ropts.c_str(), topts.c_str(),
         g_brightnessDay, iopts.c_str(), g_showSweep ? "checked" : "",
-        g_showAirports ? "checked" : "", rotopts.c_str(), uopts.c_str(),
+        g_showAirports ? "checked" : "", tlopts.c_str(), rotopts.c_str(), uopts.c_str(),
         g_volume, g_muted ? "checked" : "", aopts.c_str(), popts.c_str(),
         g_settings.homeLat, g_settings.homeLon);
     g_web.send(200, "text/html", buf);
@@ -524,6 +535,20 @@ static void handleSweep() {   // show/hide the rotating sweep line (live)
     g_web.send(200, "text/plain", "ok");
 }
 
+static void handleTrail() {   // aircraft trail length 0/1/2/3 (live)
+    if (g_web.hasArg("v")) {
+        g_trailLen = constrain((int)g_web.arg("v").toInt(), 0, 3);
+        radar::setTrailLength(g_trailLen);
+        if (g_web.hasArg("save")) {
+            Preferences p;
+            p.begin("capsuleradar", false);
+            p.putInt("traillen", g_trailLen);
+            p.end();
+        }
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
 static void handleAirports() {   // show/hide airport markers (live)
     if (g_web.hasArg("v")) {
         g_showAirports = g_web.arg("v").toInt() != 0;
@@ -642,6 +667,7 @@ void setup() {
         radar::setTheme(t);
         radar::setSweepEnabled(g_showSweep);
         radar::setAirportsEnabled(g_showAirports);
+        radar::setTrailLength(g_trailLen);
         display::setRotation((uint8_t)g_rotation);
     }
     radar::setThemeChangedCb(saveTheme);
@@ -714,6 +740,7 @@ void setup() {
     g_web.on("/idle", handleIdle);
     g_web.on("/sweep", handleSweep);
     g_web.on("/airports", handleAirports);
+    g_web.on("/trail", handleTrail);
     g_web.on("/rotate", handleRotate);
     g_web.on("/gps", handleGps);
     g_web.on("/units", handleUnits);
