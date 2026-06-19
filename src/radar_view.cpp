@@ -83,7 +83,8 @@ static bool       s_rangeLblVisible = true;
 static bool       s_sweepEnabled    = true;
 static bool       s_airportsEnabled = true;
 static int        s_trailMax        = TRAIL_MAX;   // per-aircraft trail length (0 = off)
-static int        s_flowMax         = FLOW_MAX;    // persistent flow-layer segments (0 = off)
+static int        s_flowMax         = FLOW_MAX;    // persistent flow-layer segments, count cap (0 = off)
+static int        s_flowGenMax      = 14;          // ...and an age cap in polls (~2 s each) so tracks fade out
 static lv_timer_t *s_timer    = nullptr;
 static float       s_sweepDeg = 0.0f;
 static float       s_prevSweepDeg = 0.0f;
@@ -95,9 +96,10 @@ static int         s_frameCtr     = 0;
 static lv_coord_t  s_cx = SCREEN_CX, s_cy = SCREEN_CY;
 static std::string s_selHex;
 
-struct FlowSeg { lv_point_t a, b; };
+struct FlowSeg { lv_point_t a, b; uint16_t gen; };   // gen = the poll it was laid down on
 static std::deque<FlowSeg> s_flow;
 static int s_flowRedrawCtr = 0;
+static uint16_t s_flowGen = 0;        // ++ each update(); flow segments fade out after s_flowGenMax polls
 
 struct AcDraw {
     lv_point_t pos;            // current (animated) screen position — what gets drawn
@@ -605,10 +607,10 @@ bool airportsEnabled() { return s_airportsEnabled; }
 // trail and the persistent flow layer (the long-lived "where everything has been" tracks).
 void setTrailLength(int level) {
     switch (level) {
-        case 0: s_trailMax = 0;  s_flowMax = 0;    break;
-        case 1: s_trailMax = 3;  s_flowMax = 150;  break;
-        case 3: s_trailMax = 12; s_flowMax = 1500; break;
-        default: s_trailMax = 7; s_flowMax = 700;  break;
+        case 0: s_trailMax = 0;  s_flowMax = 0;    s_flowGenMax = 0;  break;
+        case 1: s_trailMax = 3;  s_flowMax = 150;  s_flowGenMax = 8;  break;   // ~16 s
+        case 3: s_trailMax = 12; s_flowMax = 1500; s_flowGenMax = 30; break;   // ~60 s
+        default: s_trailMax = 7; s_flowMax = 700;  s_flowGenMax = 14; break;   // ~28 s
     }
     if (s_flowMax == 0) { s_flow.clear(); s_trails.clear(); }
     else while ((int)s_flow.size() > s_flowMax) s_flow.pop_front();
@@ -698,6 +700,7 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
     out.reserve(aircraft.size());
     std::set<std::string> present;
     const float R = (float)RADAR_R_OUTER_PX;
+    ++s_flowGen;                                  // one tick per poll; flow segments age in these units
 
     // Reproject the coastline only when the scope geometry actually changes (home
     // moved or range zoomed) — never per frame. Then repaint the static chrome layer.
@@ -770,7 +773,7 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
                                abs((int)hist.back().y - (int)target.y) > 0;
             if (moved) {
                 if (s_flowMax > 0 && !hist.empty()) {
-                    FlowSeg seg = { hist.back(), target };
+                    FlowSeg seg = { hist.back(), target, s_flowGen };
                     s_flow.push_back(seg);
                     while ((int)s_flow.size() > s_flowMax) s_flow.pop_front();
                     flow_draw_seg(seg);
@@ -792,6 +795,18 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
         else ++it;
     }
     if (!s_selHex.empty() && present.find(s_selHex) == present.end()) s_selHex.clear();
+
+    // Fade the flow layer by AGE, not just count: drop segments older than s_flowGenMax
+    // polls so old tracks self-clear even in busy airspace (a 5 nm view doesn't stay caked
+    // in green). If any were dropped, repaint the flow canvas so they actually disappear.
+    if (s_flowGenMax > 0 && !s_flow.empty()) {
+        bool pruned = false;
+        while (!s_flow.empty() && (uint16_t)(s_flowGen - s_flow.front().gen) > (uint16_t)s_flowGenMax) {
+            s_flow.pop_front();
+            pruned = true;
+        }
+        if (pruned) flow_redraw_all();
+    }
 
     // nearest first (the dragon balls + the list); cap to keep work bounded
     std::sort(out.begin(), out.end(),
