@@ -325,6 +325,8 @@ static void handleRoot() {
         gpsRow  = "<label><input type=checkbox class=ck ";
         gpsRow += g_useGps ? "checked" : "";
         gpsRow += " onchange='gp(this.checked)'>Use GPS for location</label>";
+        gpsRow += "<div style='font-size:12px;opacity:.6;margin:-2px 0 6px'>"
+                  "When on, the location above is used until the GPS gets a fix, then it takes over.</div>";
     }
     static char buf[8400];   // static (not on the 8 KB loop-task stack) to avoid overflow
     snprintf(buf, sizeof(buf),
