@@ -8,6 +8,7 @@
   #include <cstdint>
   using String = std::string;
 #endif
+#include <cmath>    // NAN
 #include <stdint.h>
 
 struct Aircraft {

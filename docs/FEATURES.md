@@ -23,7 +23,6 @@ Visual target: `assets/plane_radar_2.0_mockup.html`.
 8. **Setup & maintenance** — first-boot **captive portal** (WiFi creds + home lat/lon + range); settings in NVS; **OTA** updates.
 
 ## Nice-to-have / later
-- Route enrichment (origin→destination) via a secondary lookup.
 - Sound themes / mute.
 - Multiple saved home locations.
 - microSD logging of seen aircraft.
