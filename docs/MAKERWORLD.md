@@ -35,8 +35,7 @@ Capsule Radar turns a Waveshare round AMOLED dev board into a **live air-traffic
 radar** for your desk. It fetches nearby aircraft from a free ADS-B feed over WiFi and
 plots them on a phosphor-green radar scope centred on your location — rotated by
 heading, colour-coded by altitude, with fading trails and an animated sweep. Tap any
-aircraft for a detail card (callsign, type, altitude, speed, distance, heading, squawk)
-and even its **origin → destination** route.
+aircraft for a detail card (callsign, type, altitude, speed, distance, heading, squawk).
 
 It's a finished, polished build: touch UI, multiple themes, a boot splash, alert beeps,
 battery and real-time-clock support, idle auto-dim, and a built-in web page to
@@ -49,8 +48,7 @@ speaker, a small kickstand foot, and an engraved logo. Snap-/screw-together, no 
 ### Features
 - 🛩️ **Live traffic** from a free ADS-B feed (airplanes.live, fallback adsb.lol),
   refreshed every couple of seconds.
-- 👆 **Touch**: tap an aircraft → full detail card + **route** (origin → destination).
-  Swipe between **Radar / List / Stats** views.
+- 👆 **Touch**: tap an aircraft → full detail card. Swipe between **Radar / List / Stats** views.
 - 🎨 **Four themes** (long-press to switch): phosphor scope, a retro "orb" radar skin,
   amber CRT, and night-vision green.
 - 🔁 **On-screen zoom** button (10–100 km) and a **web config page** at
@@ -135,8 +133,8 @@ Open source (firmware + simulator + web flasher):
 **https://github.com/socquique/capsule-radar**
 
 ## Credits & data
-- Aircraft data: **airplanes.live** (free, **non-commercial / educational** use) ·
-  routes: **adsbdb.com**. Please keep request rates gentle.
+- Aircraft data: **airplanes.live** (free, **non-commercial / educational** use).
+  Please keep request rates gentle.
 - Hardware: Waveshare ESP32-S3-Touch-AMOLED-1.75.
 - Firmware: open source (see the repo for the license).
 

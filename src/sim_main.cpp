@@ -15,7 +15,6 @@
 #include "config.h"
 #include "radar_view.h"
 #include "ui.h"
-#include "route.h"
 #include "aircraft.h"
 #include <vector>
 #include <cmath>
@@ -194,15 +193,6 @@ int main(int argc, char **argv) {
             ui_set_date("08 Jun 2026");        // mock date
             ui_set_netinfo("Configure at\ncapsuleradar.local\n192.168.1.42");  // mock net info
         }
-        // fulfil route lookups with a mock (the sim has no network)
-        char wc[12];
-        if (route_pending(wc, sizeof(wc))) {
-            static const char *cities[] = { "Madrid", "London", "Paris", "Berlin",
-                                            "Rome", "Lisbon", "Amsterdam", "Dublin" };
-            int h = 0;
-            for (const char *p = wc; *p; ++p) h += (unsigned char)*p;
-            route_store(wc, cities[h % 8], cities[(h / 2 + 3) % 8]);
-        }
         lv_timer_handler();
 
         // headless screenshot mode: grab the boot splash early (before it fades)
@@ -248,8 +238,6 @@ int main(int argc, char **argv) {
             }
             radar::select(0);                            // select an aircraft so the card shows
             ui_on_data_updated();
-            { char wc[12]; if (route_pending(wc, sizeof(wc))) route_store(wc, "Madrid", "London"); }
-            ui_on_data_updated();                        // pick up the mock route for the card
             int ow, oh;
             SDL_GetRendererOutputSize(s_ren, &ow, &oh);
             struct Shot { const char *name; int view; int theme; };

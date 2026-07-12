@@ -7,8 +7,6 @@
 #include "aircraft.h"
 #include "geo.h"
 #include "adsb_client.h"
-#include "route.h"
-#include "route_client.h"
 #include "photo.h"
 #include "photo_client.h"
 #include "radar_view.h"
@@ -124,7 +122,7 @@ static void adsb_task(void*) {
         }
         if (conn) {
             // The live aircraft feed is the primary job, so poll FIRST every cycle. That keeps
-            // it refreshing even while the user taps around — a slow route/photo lookup (below)
+            // it refreshing even while the user taps around — a slow photo lookup (below)
             // can block this single network task, so it must never get ahead of the feed.
             const uint32_t nowMs = millis();
             const uint32_t pollInterval = g_onBattery ? POLL_INTERVAL_BATTERY_MS : POLL_INTERVAL_MS;
@@ -149,24 +147,9 @@ static void adsb_task(void*) {
                     if (++failCount >= 5) g_feedOk = false;   // sustained outage -> HUD warning
                 }
             }
-            // Then the on-demand lookups for the selected aircraft. Their timeouts are kept
-            // short (see photo_client / route_client) so a slow photo server can't freeze the
-            // feed for long; the next loop iteration polls again as soon as they return.
-            char wantCall[12];
-            if (route_pending(wantCall, sizeof(wantCall))) {
-                char from[40] = "", to[40] = "";
-                if (route_cache_get(wantCall, from, sizeof(from), to, sizeof(to))) {
-                    route_store(wantCall, from, to);                       // NVS hit, no network
-                    Serial.printf("[route] %s (cache): '%s' -> '%s'\n", wantCall, from, to);
-                } else if (route_fetch(wantCall, from, sizeof(from), to, sizeof(to))) {
-                    route_store(wantCall, from, to);
-                    route_cache_put(wantCall, from, to);                  // remember across reboots
-                    Serial.printf("[route] %s (net): '%s' -> '%s'\n", wantCall, from, to);
-                } else {
-                    route_store(wantCall, from, to);   // empty -> don't refetch this session
-                    Serial.printf("[route] %s: no route\n", wantCall);
-                }
-            }
+            // Then the on-demand photo lookup for the selected aircraft. Its timeout is kept
+            // short (see photo_client) so a slow photo server can't freeze the feed for long;
+            // the next loop iteration polls again as soon as it returns.
             char wantHex[10];
             if (photo_pending(wantHex, sizeof(wantHex))) photo_fetch(wantHex);
         }
@@ -804,7 +787,6 @@ void setup() {
     Serial.printf("PSRAM: %u bytes free\n", (unsigned)ESP.getFreePsram());
 
     loadSettings();
-    route_cache_begin();   // clear stale route cache if the label format changed
 
     // --- Display + LVGL (M0) ----------------------------------------------
     // CO5300 AMOLED over QSPI + LVGL draw buffers in PSRAM, then a hello screen.

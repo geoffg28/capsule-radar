@@ -2,7 +2,6 @@
 // Pure LVGL, portable. Taps hit-test via radar::hitTest; selection lives in radar.
 #include "ui.h"
 #include "radar_view.h"
-#include "route.h"
 #include "photo.h"
 #include "config.h"
 #include <lvgl.h>
@@ -20,9 +19,7 @@
 static lv_obj_t *s_tv = nullptr;
 static lv_obj_t *s_tileRadar = nullptr, *s_tileList = nullptr, *s_tileStats = nullptr;
 static lv_obj_t *s_card = nullptr, *s_cardTitle = nullptr, *s_cardL = nullptr, *s_cardR = nullptr;
-static lv_obj_t *s_cardRoute = nullptr;
 static lv_obj_t *s_photo = nullptr, *s_photoCredit = nullptr;   // aircraft photo above the card
-static char s_lastRouteReq[12] = "";
 static lv_obj_t *s_hudWifi = nullptr, *s_hudCount = nullptr, *s_hudClock = nullptr, *s_hudBatt = nullptr, *s_hudDate = nullptr;
 static lv_obj_t *s_hudBars[4] = { nullptr, nullptr, nullptr, nullptr };   // WiFi signal-strength bars
 static lv_obj_t *s_list = nullptr;
@@ -99,7 +96,6 @@ static void refresh_card(void) {
         lv_obj_add_flag(s_card, LV_OBJ_FLAG_HIDDEN);
         if (s_photo)       lv_obj_add_flag(s_photo, LV_OBJ_FLAG_HIDDEN);
         if (s_photoCredit) lv_obj_add_flag(s_photoCredit, LV_OBJ_FLAG_HIDDEN);
-        s_lastRouteReq[0] = 0;
         return;
     }
     lv_obj_clear_flag(s_card, LV_OBJ_FLAG_HIDDEN);
@@ -123,24 +119,6 @@ static void refresh_card(void) {
     snprintf(right, sizeof(right), "V/S  %s\nHDG  %03.0f\nSQK  %s", vsS, in.bearingDeg, sqS);
     lv_label_set_text(s_cardL, left);
     lv_label_set_text(s_cardR, right);
-
-    // route (origin -> destination), looked up asynchronously by callsign
-    if (in.call[0] && strcmp(in.call, s_lastRouteReq) != 0) {
-        snprintf(s_lastRouteReq, sizeof(s_lastRouteReq), "%s", in.call);
-        route_request(in.call);
-    }
-    char rfrom[40], rto[40];
-    if (!in.call[0]) {
-        lv_label_set_text(s_cardRoute, "Route -");                 // no callsign -> nothing to look up
-    } else if (route_get(in.call, rfrom, sizeof(rfrom), rto, sizeof(rto))) {
-        char rt[96];
-        if (rfrom[0] || rto[0]) snprintf(rt, sizeof(rt), "%s -> %s", rfrom[0] ? rfrom : "?", rto[0] ? rto : "?");
-        else                    snprintf(rt, sizeof(rt), "Route unavailable");
-        fold_ascii(rt);
-        lv_label_set_text(s_cardRoute, rt);
-    } else {
-        lv_label_set_text(s_cardRoute, "Looking up route...");     // pending: lookup in flight
-    }
 
     // aircraft photo (planespotters), shown above the card when one is available
     if (in.hex[0]) photo_request(in.hex);
@@ -397,7 +375,7 @@ static lv_obj_t *make_round_panel(lv_obj_t *parent) {
 static void build_card(void) {
     s_card = lv_obj_create(s_tileRadar);
     lv_obj_remove_style_all(s_card);
-    lv_obj_set_size(s_card, 300, 118);
+    lv_obj_set_size(s_card, 300, 90);
     lv_obj_align(s_card, LV_ALIGN_CENTER, 0, 66);
     lv_obj_set_style_bg_color(s_card, UI_PANEL, 0);
     lv_obj_set_style_bg_opa(s_card, 235, 0);
@@ -424,11 +402,6 @@ static void build_card(void) {
     lv_obj_set_style_text_font(s_cardR, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(s_cardR, UI_SOFT, 0);
     lv_obj_align(s_cardR, LV_ALIGN_TOP_LEFT, 150, 26);
-
-    s_cardRoute = lv_label_create(s_card);
-    lv_obj_set_style_text_font(s_cardRoute, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_cardRoute, UI_GREEN, 0);
-    lv_obj_align(s_cardRoute, LV_ALIGN_TOP_LEFT, 0, 76);
 
     // aircraft photo + credit, floating above the card (hidden until one loads)
     s_photo = lv_canvas_create(s_tileRadar);

@@ -43,8 +43,7 @@ engraved logo. No soldering — the Waveshare board carries all the electronics.
 
 **Touch & details**
 - **Tap an aircraft** to open a detail card: callsign, type, altitude, vertical speed,
-  ground speed, distance, bearing, squawk, and the **origin → destination route**
-  (looked up online and cached so the same flight isn't re-queried).
+  ground speed, distance, bearing, squawk.
 - **Swipe** between three circular views: **Radar**, **List**, and **Stats**.
 - **On-screen zoom button** cycles the display range (10 / 20 / 30 / 50 / 100 km) and
   shows the current value.
@@ -193,7 +192,7 @@ Once it's running, you can update wirelessly:
 
 | Action | Gesture |
 |---|---|
-| Inspect an aircraft | **Tap** it → detail card with route |
+| Inspect an aircraft | **Tap** it → detail card |
 | Switch view | **Swipe** left/right (Radar ↔ List ↔ Stats) |
 | Change zoom range | **Tap the range button** (⟳ … km) |
 | Change theme | **Long-press** the screen |
@@ -217,8 +216,8 @@ Once it's running, you can update wirelessly:
 
 ## Credits, data & license
 
-- Aircraft data: **airplanes.live** (free, **non-commercial / educational** use). Routes:
-  **adsbdb.com**. Please keep request rates gentle — this firmware already does.
+- Aircraft data: **airplanes.live** (free, **non-commercial / educational** use).
+  Please keep request rates gentle — this firmware already does.
 - Hardware: **Waveshare ESP32-S3-Touch-AMOLED-1.75**.
 - Firmware & web flasher (open source): **https://github.com/socquique/capsule-radar**
 - Suggested model license (consistent with the non-commercial data sources):
