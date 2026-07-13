@@ -126,14 +126,16 @@ static void adsb_task(void*) {
             // can block this single network task, so it must never get ahead of the feed.
             const uint32_t nowMs = millis();
             const uint32_t pollInterval = g_onBattery ? POLL_INTERVAL_BATTERY_MS : POLL_INTERVAL_MS;
-            if (lastPoll == 0 || nowMs - lastPoll >= pollInterval) {  // aircraft feed
+            static int      failCount = 0;
+            static uint32_t backoffMs = 0;   // extra delay stacked on top of pollInterval while failing
+            if (lastPoll == 0 || nowMs - lastPoll >= pollInterval + backoffMs) {  // aircraft feed
                 lastPoll = nowMs;
-                static int failCount = 0;
                 // poll() flips to the alternate host on failure, so consecutive polls already
                 // alternate hosts; a single transient miss is absorbed by the failCount window.
                 if (g_adsb.poll(fresh)) {
                     Serial.printf("[adsb] fetched %u aircraft\n", (unsigned)fresh.size());
                     failCount = 0;
+                    backoffMs = 0;                   // recovered: back to the normal cadence
                     g_feedOk = true;
                     lastFeedOk = nowMs;
                     g_lastFeedOkMs = nowMs;          // HUD: mark data as fresh
@@ -145,6 +147,15 @@ static void adsb_task(void*) {
                 } else {
                     Serial.println("[adsb] poll failed");
                     if (++failCount >= 5) g_feedOk = false;   // sustained outage -> HUD warning
+                    // Both hosts get hit every cycle once one is struggling (see poll()), so a
+                    // sustained outage can hammer the fallback into its own rate limit. Back off
+                    // exponentially (capped at 60s) instead of retrying every poll cycle forever.
+                    if (failCount >= 3) {
+                        backoffMs = backoffMs ? backoffMs * 2 : 4000;
+                        if (backoffMs > 60000) backoffMs = 60000;
+                        Serial.printf("[adsb] backing off %lu ms after %d failures\n",
+                                      (unsigned long)backoffMs, failCount);
+                    }
                 }
             }
             // Then the on-demand photo lookup for the selected aircraft. Its timeout is kept
@@ -269,16 +280,17 @@ static WebServer g_web(80);
 
 static void handleRoot() {
     const int th = radar::theme();
-    const int ranges[] = {10, 15, 25, 30, 50, 100, 150, 250};
     // The value submitted stays in km (the device works in km); only the label is shown in
-    // the user's chosen distance unit so the config page matches the screen.
+    // the user's chosen distance unit so the config page matches the screen. Same NM-clean
+    // steps as the on-device zoom button (config.h RANGE_STEPS_KM), so both stay in sync.
     const float    ufac  = (g_units == 0) ? 0.539957f : (g_units == 2 ? 0.621371f : 1.0f);
     const char    *uname = (g_units == 0) ? "nm" : (g_units == 2 ? "mi" : "km");
     String ropts;
-    for (int r : ranges) {
+    for (float r : RANGE_STEPS_KM) {
         char o[72];
-        snprintf(o, sizeof(o), "<option value=%d%s>%.0f %s</option>",
-                 r, (r == (int)(g_settings.rangeKm + 0.5f)) ? " selected" : "", r * ufac, uname);
+        float diff = r - g_settings.rangeKm; if (diff < 0) diff = -diff;
+        snprintf(o, sizeof(o), "<option value=%.2f%s>%.0f %s</option>",
+                 (double)r, (diff < 0.5f) ? " selected" : "", (double)(r * ufac), uname);
         ropts += o;
     }
     const char *tnames[] = {"Phosphor", "Orb", "Amber CRT", "Military"};
@@ -822,6 +834,9 @@ void setup() {
     ui_set_range_cb(onRangeChange);              // on-screen zoom button
     ui_set_units(g_units);                       // apply saved unit preset
     ui_set_range_km(g_settings.rangeKm);         // show the loaded range
+    radar::primeStaticLayers(g_settings.homeLat, g_settings.homeLon, g_settings.rangeKm);
+                                                  // project coastline/airports now, don't wait for
+                                                  // the first ADS-B poll to land
 
     imu_begin();       // face-down sleep (no-op if the IMU isn't detected)
     battery_begin();   // AXP2101 (no-op if not detected / no battery)

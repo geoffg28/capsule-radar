@@ -45,7 +45,7 @@ engraved logo. No soldering — the Waveshare board carries all the electronics.
 - **Tap an aircraft** to open a detail card: callsign, type, altitude, vertical speed,
   ground speed, distance, bearing, squawk.
 - **Swipe** between three circular views: **Radar**, **List**, and **Stats**.
-- **On-screen zoom button** cycles the display range (10 / 20 / 30 / 50 / 100 km) and
+- **On-screen zoom button** cycles the display range (5 / 10 / 20 / 50 NM) and
   shows the current value.
 - **Long-press** the screen to cycle the visual theme.
 

@@ -9,7 +9,12 @@
 #include "config.h"
 #include <Arduino.h>
 #include <Wire.h>
+// The legacy driver/i2s.h header #warns on include (deprecated in favor of i2s_std.h/
+// i2s_pdm.h/i2s_tdm.h) — deliberately kept, see the note above; silence just that warning.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcpp"
 #include "driver/i2s.h"
+#pragma GCC diagnostic pop
 #include "esp_heap_caps.h"
 #include <math.h>
 
@@ -111,8 +116,11 @@ static bool i2s_setup() {
     cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;       // stereo
     cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
     cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"   // dma_buf_count/len: aliases kept for the legacy driver above
     cfg.dma_buf_count = 4;
     cfg.dma_buf_len = 256;
+#pragma GCC diagnostic pop
     cfg.use_apll = false;
     cfg.tx_desc_auto_clear = true;
     cfg.fixed_mclk = 0;

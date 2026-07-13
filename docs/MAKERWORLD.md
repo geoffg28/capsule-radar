@@ -51,7 +51,7 @@ speaker, a small kickstand foot, and an engraved logo. Snap-/screw-together, no 
 - 👆 **Touch**: tap an aircraft → full detail card. Swipe between **Radar / List / Stats** views.
 - 🎨 **Four themes** (long-press to switch): phosphor scope, a retro "orb" radar skin,
   amber CRT, and night-vision green.
-- 🔁 **On-screen zoom** button (10–100 km) and a **web config page** at
+- 🔁 **On-screen zoom** button (5–50 NM) and a **web config page** at
   `capsuleradar.local` (centre point, range, theme, brightness, sound, dim timer).
 - 🔊 **Alert pings** (built-in speaker): a soft ping for new contacts, an urgent beep
   for emergency/military squawks. Volume + mute on the web.

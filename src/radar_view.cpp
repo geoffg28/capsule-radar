@@ -98,6 +98,7 @@ static uint32_t    s_pollMs       = POLL_INTERVAL_MS;
 static int         s_frameCtr     = 0;
 static lv_coord_t  s_cx = SCREEN_CX, s_cy = SCREEN_CY;
 static std::string s_selHex;
+static double s_coLat = 1e9, s_coLon = 1e9; static float s_coRange = -1.0f;   // last-projected geometry
 
 struct FlowSeg { lv_point_t a, b; uint16_t gen; };   // gen = the poll it was laid down on
 static std::deque<FlowSeg> s_flow;
@@ -222,14 +223,18 @@ static void grid_draw_cb(lv_event_t *e) {
     coastline_draw(d, COAST_COLOR, 165, 2);
     if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, AIRPORT_COLOR_MED, 150);
 
-    // phosphor: concentric rings + crosshair
+    // phosphor: concentric rings + crosshair — 5 evenly spaced rings from center to the
+    // outer edge, so each ring is always range/5 regardless of the selected zoom level.
     lv_draw_arc_dsc_t ad;
     lv_draw_arc_dsc_init(&ad);
     ad.color = s_cRing;
     ad.width = 2;
-    const lv_coord_t rr[4] = { 50, 104, 160, RADAR_R_OUTER_PX };
-    const lv_opa_t   ro[4] = { 66, 66, 66, 87 };
-    for (int i = 0; i < 4; ++i) { ad.opa = ro[i]; lv_draw_arc(d, &ad, &c, rr[i], 0, 360); }
+    const int RING_COUNT = 5;
+    for (int i = 1; i <= RING_COUNT; ++i) {
+        const lv_coord_t r = (lv_coord_t)lroundf((float)RADAR_R_OUTER_PX * i / RING_COUNT);
+        ad.opa = (i == RING_COUNT) ? 87 : 66;   // outer ring drawn slightly bolder
+        lv_draw_arc(d, &ad, &c, r, 0, 360);
+    }
 
     lv_draw_line_dsc_t ll;
     lv_draw_line_dsc_init(&ll);
@@ -703,21 +708,16 @@ void init(void *lv_parent) {
     setTheme(s_theme);
 }
 
-void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
-    std::vector<AcDraw> out;
-    out.reserve(aircraft.size());
-    std::set<std::string> present;
-    const float R = (float)RADAR_R_OUTER_PX;
-    ++s_flowGen;                                  // one tick per poll; flow segments age in these units
-
-    // Reproject the coastline only when the scope geometry actually changes (home
-    // moved or range zoomed) — never per frame. Then repaint the static chrome layer.
-    static double s_coLat = 1e9, s_coLon = 1e9; static float s_coRange = -1.0f;
-    if (s.homeLat != s_coLat || s.homeLon != s_coLon || s.rangeKm != s_coRange) {
+// Reproject the coastline/airports only when the scope geometry actually changes (home
+// moved or range zoomed) — never per frame. Shared by update() and primeStaticLayers()
+// so booting doesn't have to wait for the first aircraft poll to show them.
+static void reproject_static_if_needed(double homeLat, double homeLon, float rangeKm) {
+    if (homeLat != s_coLat || homeLon != s_coLon || rangeKm != s_coRange) {
         const bool firstFix = (s_coRange < 0.0f);
-        s_coLat = s.homeLat; s_coLon = s.homeLon; s_coRange = s.rangeKm;
-        coastline_project(s.homeLat, s.homeLon, s.rangeKm, s_cx, s_cy, R);
-        airports_project(s.homeLat, s.homeLon, s.rangeKm, s_cx, s_cy, R);
+        s_coLat = homeLat; s_coLon = homeLon; s_coRange = rangeKm;
+        const float R = (float)RADAR_R_OUTER_PX;
+        coastline_project(homeLat, homeLon, rangeKm, s_cx, s_cy, R);
+        airports_project(homeLat, homeLon, rangeKm, s_cx, s_cy, R);
         if (s_gridLayer) lv_obj_invalidate(s_gridLayer);
         if (!firstFix) {
             // Scope scale/center changed: old trails were plotted at the previous
@@ -727,6 +727,20 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
             flow_redraw_all();
         }
     }
+}
+
+void primeStaticLayers(double homeLat, double homeLon, float rangeKm) {
+    reproject_static_if_needed(homeLat, homeLon, rangeKm);
+}
+
+void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
+    std::vector<AcDraw> out;
+    out.reserve(aircraft.size());
+    std::set<std::string> present;
+    const float R = (float)RADAR_R_OUTER_PX;
+    ++s_flowGen;                                  // one tick per poll; flow segments age in these units
+
+    reproject_static_if_needed(s.homeLat, s.homeLon, s.rangeKm);
 
     std::map<std::string, lv_point_t> prevPos;        // smooth-motion: glide starts here
     for (const AcDraw &a : s_acs) prevPos[a.hex] = a.pos;
