@@ -40,6 +40,10 @@ namespace radar {
 // Build the radar scope (rings, crosshair, rose, sweep, center) under `parent`.
 void init(void* lv_parent);                 // pass lv_obj_t*
 
+// Project the coastline/airports right away, without waiting for the first aircraft
+// poll — call once at boot, right after init(), with the loaded home/range settings.
+void primeStaticLayers(double homeLat, double homeLon, float rangeKm);
+
 // Rebuild the aircraft layer from the latest snapshot. Call at poll cadence.
 void update(const std::vector<Aircraft>& aircraft, const RadarSettings& s);
 

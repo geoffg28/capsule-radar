@@ -33,8 +33,13 @@ bool AdsbClient::poll(std::vector<Aircraft>& out) {
     // Prefer the primary host, and give it a quick second try before touching the fallback:
     // the primary is reliable in practice, while the fallback can be slow to time out from
     // some networks (turning one transient primary blip into a long no-data gap + amber HUD).
+    // A short delay between attempts gives the TLS/socket teardown from the previous try
+    // time to actually release its buffers -- back-to-back retries with no gap were seen to
+    // starve themselves of contiguous internal RAM, causing IncompleteInput parse failures.
     if (fetchFrom(ADSB_PRIMARY_HOST, out)) return true;
+    delay(300);
     if (fetchFrom(ADSB_PRIMARY_HOST, out)) return true;   // transient blip -> retry the healthy host
+    delay(300);
     return fetchFrom(ADSB_FALLBACK_HOST, out);            // last resort
 }
 
@@ -49,17 +54,63 @@ bool AdsbClient::fetchFrom(const char* host, std::vector<Aircraft>& out) {
 #else
     // client.setCACert(ROOT_CA_PEM);                  // production: pin the root CA
 #endif
+    client.setTimeout(15000);        // the Stream-level read timeout (default 1000ms) governs
+                                      // how long a single low-level read waits for more bytes —
+                                      // HTTPClient::setTimeout() below does NOT reliably propagate
+                                      // to it, so a normal mid-transfer WiFi stall could cut a
+                                      // read short well before our intended 15s budget.
 
     HTTPClient http;
     http.setReuse(false);
-    http.setConnectTimeout(6000);    // fail reasonably fast: a slow host must not block the
-    http.setTimeout(8000);           // task (and the user's route/photo lookups) for too long
+    http.setConnectTimeout(6000);     // fail reasonably fast: a slow host must not block the
+    http.setTimeout(15000);          // task (and the user's photo lookups) for too long — but a
+                                      // busy/Class-B area's JSON can be large, so give it room
+                                      // to actually finish rather than cutting the read short.
     if (!http.begin(client, url)) { Serial.printf("[adsb] begin failed (%s)\n", host); return false; }
     http.addHeader("User-Agent", ADSB_USER_AGENT);
     http.addHeader("Accept", "application/json");
 
     const int code = http.GET();
     if (code != 200) { Serial.printf("[adsb] HTTP %d (%s)\n", code, host); http.end(); return false; }
+    const int declaredLen = http.getSize();   // Content-Length, or -1 if chunked/unknown
+    Serial.printf("[adsb] HTTP 200 (%s), content-length=%d\n", host, declaredLen);
+
+    // Read the WHOLE body into a PSRAM buffer first, then parse from that buffer -- rather than
+    // parsing straight off the stream, where a slow/bursty delivery mid-parse previously showed
+    // up as an opaque "IncompleteInput" with no way to tell how much we'd actually received.
+    const size_t cap = (declaredLen > 0) ? (size_t)declaredLen : (size_t)(512 * 1024);
+    char *body = (char *)heap_caps_malloc(cap + 1, MALLOC_CAP_SPIRAM);
+    if (!body) {
+        Serial.printf("[adsb] body buffer alloc failed (%s, %u bytes)\n", host, (unsigned)cap);
+        http.end();
+        return false;
+    }
+    // Manually pump the stream rather than trust a single readBytes() call: WiFiClientSecure
+    // appears to hand over only its first internal TLS-decrypt buffer's worth of data and stop,
+    // so we loop on available()/read(), only giving up after a genuine multi-second stall with
+    // no new bytes at all (not just "no bytes this instant" -- that's normal between TCP packets).
+    WiFiClient *stream = http.getStreamPtr();
+    size_t got = 0;
+    uint32_t lastData = millis();
+    while (got < cap) {
+        const int avail = stream->available();
+        if (avail > 0) {
+            const size_t want = cap - got;
+            const int n = stream->read((uint8_t *)(body + got), (size_t)avail < want ? (size_t)avail : want);
+            if (n > 0) { got += (size_t)n; lastData = millis(); continue; }
+        }
+        if (!http.connected() && stream->available() == 0) break;   // server closed, nothing left to read
+        if (millis() - lastData > 15000) break;                     // true stall -> give up
+        delay(5);
+    }
+    http.end();
+    if (declaredLen > 0 && got != (size_t)declaredLen) {
+        Serial.printf("[adsb] short read (%s): got %u of %u declared bytes\n",
+                      host, (unsigned)got, (unsigned)declaredLen);
+        heap_caps_free(body);
+        return false;
+    }
+    body[got] = 0;
 
     // Only keep the fields we use -> much smaller parsed document.
     JsonDocument filter(&s_jsonPsram);
@@ -72,14 +123,13 @@ bool AdsbClient::fetchFrom(const char* host, std::vector<Aircraft>& out) {
             filter[k][0][f] = true;
 
     JsonDocument doc(&s_jsonPsram);
-    DeserializationError err = deserializeJson(doc, http.getStream(),
-                                               DeserializationOption::Filter(filter));
-    http.end();
-    if (err) return false;
+    DeserializationError err = deserializeJson(doc, body, got, DeserializationOption::Filter(filter));
+    heap_caps_free(body);
+    if (err) { Serial.printf("[adsb] parse error (%s): %s (got %u bytes)\n", host, err.c_str(), (unsigned)got); return false; }
 
     JsonArrayConst arr = doc["ac"].as<JsonArrayConst>();
     if (arr.isNull()) arr = doc["aircraft"].as<JsonArrayConst>();
-    if (arr.isNull()) return false;
+    if (arr.isNull()) { Serial.printf("[adsb] no ac/aircraft array (%s)\n", host); return false; }
 
     // Keep the ADSB_MAX_AIRCRAFT *nearest* aircraft (not just the first ones the feed happens to
     // list), so busy areas still show the traffic closest to you. We gate by distance BEFORE

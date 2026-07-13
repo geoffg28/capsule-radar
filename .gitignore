@@ -15,5 +15,8 @@
 build/
 dist/
 
+# Serial monitor captures (monitor_filters = log2file in platformio.ini)
+logs/
+
 # Secrets (WiFi creds live in NVS on the device, never in the repo)
 secrets.h

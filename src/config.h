@@ -1,7 +1,7 @@
 #pragma once
 // Capsule Radar — build & user configuration.
 
-#define FW_VERSION "1.3.22"   // shown on the web config page + Stats screen; bump on release
+#define FW_VERSION "1.3.23"   // shown on the web config page + Stats screen; bump on release
 // Edit pins below: replace every -1 with the value from the Waveshare factory demo
 // (see docs/HARDWARE.md and docs/SETUP.md). Do NOT guess them.
 
@@ -11,9 +11,13 @@
 #define HOME_LON_DEFAULT    0.1059
 
 // ---------- Radar ----------
-#define RANGE_KM_DEFAULT    30.0f          // display range (outer ring). Query is wider, see ADSB_QUERY_KM
+// Range steps are aviation-standard NM increments; stored as km internally (1 nm = 1.852 km
+// exactly) since the projection math (geo::*, coastline, airports) already works in km.
+#define NM_TO_KM            1.852f
+static const float RANGE_STEPS_NM[] = {5.0f, 10.0f, 15.0f, 20.0f, 50.0f};
+static const float RANGE_STEPS_KM[] = {5.0f * NM_TO_KM, 10.0f * NM_TO_KM, 15.0f * NM_TO_KM, 20.0f * NM_TO_KM, 50.0f * NM_TO_KM};
+#define RANGE_KM_DEFAULT    (10.0f * NM_TO_KM)   // display range (outer ring) = 10 NM. Query is wider, see ADSB_QUERY_KM
 #define ADSB_QUERY_KM       50.0f          // feed query radius (> display: off-range traffic shows as edge arrows)
-static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 #define POLL_INTERVAL_MS    2000           // be gentle with the free API (>=1000)
 #define POLL_INTERVAL_BATTERY_MS 5000      // slower polling when running on battery
 #define MOTION_INTERP       1              // 1 = glyphs glide between polls; 0 = snap to new pos

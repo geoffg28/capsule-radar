@@ -529,7 +529,7 @@ void ui_create(void) {
     lv_obj_clear_flag(s_zoomBtn, LV_OBJ_FLAG_SCROLL_CHAIN);  // tapping it must not swipe the tileview
     lv_obj_add_event_cb(s_zoomBtn, zoom_cb, LV_EVENT_PRESSED, NULL);  // fire on touch-down, not release
     s_zoomLbl = lv_label_create(s_zoomBtn);
-    lv_label_set_text(s_zoomLbl, LV_SYMBOL_LOOP " 30 km");
+    lv_label_set_text(s_zoomLbl, LV_SYMBOL_LOOP " 10 nm");   // placeholder; ui_set_range_km() overwrites at boot
     lv_obj_set_style_text_font(s_zoomLbl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(s_zoomLbl, UI_GREEN, 0);
     lv_obj_center(s_zoomLbl);
