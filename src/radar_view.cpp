@@ -36,8 +36,10 @@
 // coastline outline — steel blue, deliberately off the red/amber/lime/green/cyan
 // altitude-trail palette so land never reads as an aircraft track.
 #define COAST_COLOR lv_color_hex(0x4E86C6)
-// airport markers — a neutral muted grey-blue so they sit quietly under the traffic.
-#define AIRPORT_COLOR lv_color_hex(0x8A93A6)
+// airport markers — VFR sectional chart convention: blue for large/hub airports.
+#define AIRPORT_COLOR lv_color_hex(0x3B5FCC)
+// medium/regional airports (e.g. Class C/D fields) — sectional-style magenta, same ring size.
+#define AIRPORT_COLOR_MED lv_color_hex(0xC6357A)
 // ---- orb palette (Orb) ----
 #define ORB_BLIP   lv_color_hex(0xFFE11A)
 #define ORB_EMERG  lv_color_hex(0xFF4D2E)
@@ -210,7 +212,7 @@ static void grid_draw_cb(lv_event_t *e) {
         td.border_width = 1;
         td.border_opa = 160;
         coastline_draw(d, COAST_COLOR, 170, 2);    // landmass outline under the triangle
-        if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, 150);
+        if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, AIRPORT_COLOR_MED, 150);
         lv_draw_polygon(d, &td, tri, 3);
         return;
     }
@@ -218,7 +220,7 @@ static void grid_draw_cb(lv_event_t *e) {
     // coastline first, so the rings/crosshair sit cleanly on top of it.
     // Steel blue + 2 px so it reads as a map outline, distinct from the green altitude trails.
     coastline_draw(d, COAST_COLOR, 165, 2);
-    if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, 150);
+    if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, AIRPORT_COLOR_MED, 150);
 
     // phosphor: concentric rings + crosshair
     lv_draw_arc_dsc_t ad;
