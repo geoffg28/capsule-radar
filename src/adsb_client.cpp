@@ -28,6 +28,14 @@ static PsramJsonAllocator s_jsonPsram;
 // which makes ArduinoJson intermittently report IncompleteInput. Deliberately wrap
 // the client without overriding readBytes(): Stream's timed byte reader retries
 // temporary no-data reads until the configured timeout.
+//
+// UNUSED, and kept deliberately. This is upstream's fix for the IncompleteInput bug; this
+// fork fixes the same bug by bulk-reading the body into PSRAM and parsing from there (see
+// fetchFrom below). Both work -- tests/adsb_json_stream_test.cpp proves this one does -- but
+// parsing through a Stream costs ArduinoJson one readBytes() call PER BYTE, which measured as
+// a ~10% render frame-rate drop on the device (7.79 -> 7.02 fps). Retained so the class stays
+// in sync with upstream and the test keeps compiling; do not wire it back in without
+// re-running that measurement.
 class ReliableJsonStream : public Stream {
 public:
     explicit ReliableJsonStream(Stream& source) : _source(source) {}
