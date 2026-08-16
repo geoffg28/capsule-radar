@@ -24,6 +24,29 @@ struct PsramJsonAllocator : ArduinoJson::Allocator {
 };
 static PsramJsonAllocator s_jsonPsram;
 
+// NetworkClient::readBytes() treats a transient negative TLS read as end-of-input,
+// which makes ArduinoJson intermittently report IncompleteInput. Deliberately wrap
+// the client without overriding readBytes(): Stream's timed byte reader retries
+// temporary no-data reads until the configured timeout.
+class ReliableJsonStream : public Stream {
+public:
+    explicit ReliableJsonStream(Stream& source) : _source(source) {}
+    int available() override { return _source.available(); }
+    int read() override {
+        const int value = _source.read();
+        if (value >= 0) ++_bytesRead;
+        return value;
+    }
+    int peek() override { return _source.peek(); }
+    void flush() override { _source.flush(); }
+    size_t write(uint8_t) override { return 0; }
+    size_t bytesRead() const { return _bytesRead; }
+
+private:
+    Stream& _source;
+    size_t _bytesRead = 0;
+};
+
 void AdsbClient::begin(double homeLat, double homeLon, float rangeKm) {
     _lat = homeLat; _lon = homeLon; _rangeKm = rangeKm;
 }
@@ -36,6 +59,8 @@ bool AdsbClient::poll(std::vector<Aircraft>& out) {
     // A short delay between attempts gives the TLS/socket teardown from the previous try
     // time to actually release its buffers -- back-to-back retries with no gap were seen to
     // starve themselves of contiguous internal RAM, causing IncompleteInput parse failures.
+    // The retries only fire after a request has already failed, so the steady-state cadence
+    // stays at one request per poll and well inside the provider's rate limit.
     if (fetchFrom(ADSB_PRIMARY_HOST, out)) return true;
     delay(300);
     if (fetchFrom(ADSB_PRIMARY_HOST, out)) return true;   // transient blip -> retry the healthy host
@@ -71,7 +96,18 @@ bool AdsbClient::fetchFrom(const char* host, std::vector<Aircraft>& out) {
     http.addHeader("Accept", "application/json");
 
     const int code = http.GET();
-    if (code != 200) { Serial.printf("[adsb] HTTP %d (%s)\n", code, host); http.end(); return false; }
+    if (code != 200) {
+        // Upstream's diagnostics: the TLS error + heap picture explain most non-200s here
+        // (handshake failures show up as a negative code with an empty body).
+        char tls[128] = "";
+        const int tlsCode = client.lastError(tls, sizeof(tls));
+        Serial.printf("[adsb] HTTP %d (%s) tls=%d '%s' heap=%u largest=%u psram=%u\n",
+                      code, host, tlsCode, tls,
+                      (unsigned)ESP.getFreeHeap(),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                      (unsigned)ESP.getFreePsram());
+        http.end(); return false;
+    }
     const int declaredLen = http.getSize();   // Content-Length, or -1 if chunked/unknown
     Serial.printf("[adsb] HTTP 200 (%s), content-length=%d\n", host, declaredLen);
 
@@ -123,6 +159,10 @@ bool AdsbClient::fetchFrom(const char* host, std::vector<Aircraft>& out) {
             filter[k][0][f] = true;
 
     JsonDocument doc(&s_jsonPsram);
+    // Parse from the fully-buffered body (read above), not from the live stream: the buffered
+    // read already guarantees we have the whole document, so a slow/bursty delivery can't turn
+    // into an opaque IncompleteInput mid-parse. (Upstream solves the same bug with the
+    // ReliableJsonStream wrapper above, which is why that class is currently unused here.)
     DeserializationError err = deserializeJson(doc, body, got, DeserializationOption::Filter(filter));
     heap_caps_free(body);
     if (err) { Serial.printf("[adsb] parse error (%s): %s (got %u bytes)\n", host, err.c_str(), (unsigned)got); return false; }

@@ -1,7 +1,7 @@
 #pragma once
 // Capsule Radar — build & user configuration.
 
-#define FW_VERSION "1.3.23"   // shown on the web config page + Stats screen; bump on release
+#define FW_VERSION "1.3.25"   // shown on the web config page + Stats screen; bump on release
 // Edit pins below: replace every -1 with the value from the Waveshare factory demo
 // (see docs/HARDWARE.md and docs/SETUP.md). Do NOT guess them.
 
@@ -16,12 +16,24 @@
 #define NM_TO_KM            1.852f
 static const float RANGE_STEPS_NM[] = {5.0f, 10.0f, 15.0f, 20.0f, 50.0f};
 static const float RANGE_STEPS_KM[] = {5.0f * NM_TO_KM, 10.0f * NM_TO_KM, 15.0f * NM_TO_KM, 20.0f * NM_TO_KM, 50.0f * NM_TO_KM};
-#define RANGE_KM_DEFAULT    (10.0f * NM_TO_KM)   // display range (outer ring) = 10 NM. Query is wider, see ADSB_QUERY_KM
-#define ADSB_QUERY_KM       50.0f          // feed query radius (> display: off-range traffic shows as edge arrows)
+#define RANGE_KM_DEFAULT    (10.0f * NM_TO_KM)   // display range (outer ring) = 10 NM. Query is wider, see below.
+// Feed query radius = display range × MULT, clamped to [MIN, MAX]. Querying a bit wider than
+// the display shows off-range traffic as edge arrows. The floor MUST stay small: the old fixed
+// 50 km radius made small display ranges still pull a huge aircraft list in busy airspace, which
+// timed out the poll (feed permanently amber near big hubs). Fix contributed by @alexzogh
+// (STLWarehouse). The NM steps above span 9.3–92.6 km, so MULT keeps the query inside [MIN, MAX].
+#define ADSB_QUERY_MULT     1.4f
+#define ADSB_QUERY_MIN_KM   12.0f
+#define ADSB_QUERY_MAX_KM   150.0f
 #define POLL_INTERVAL_MS    2000           // be gentle with the free API (>=1000)
 #define POLL_INTERVAL_BATTERY_MS 5000      // slower polling when running on battery
 #define MOTION_INTERP       1              // 1 = glyphs glide between polls; 0 = snap to new pos
-#define AC_STALE_MS         15000          // drop aircraft not refreshed in this long
+#define AC_STALE_MS         15000          // keep the last contacts through brief empty feed responses
+
+// ---------- Weather forecast (Open-Meteo, no API key) ----------
+#define WEATHER_REFRESH_MS  1800000UL      // 30 minutes; forecast data changes slowly
+#define WX_RADAR_REFRESH_MS 300000UL       // RainViewer frames update about every 5 minutes
+#define CLOUD_IMAGE_REFRESH_MS 600000UL    // EUMETSAT MTG cloud imagery; cache for 10 minutes
 
 // ---------- Screen (CO5300 AMOLED) ----------
 #define SCREEN_W            466
