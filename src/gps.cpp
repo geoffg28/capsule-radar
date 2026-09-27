@@ -106,9 +106,18 @@ static bool gps_hw_reset() {
     if (!exp_read(0x01, &out) || !exp_read(0x03, &cfg)) return false;   // 0x01 output, 0x03 config (1 = input)
     if (!exp_write(0x01, out & ~bit)) return false;   // latch LOW first so the switch to output can't glitch HIGH
     if (!exp_write(0x03, cfg & ~bit)) return false;   // P7 output -> RESET asserted
+    // Self-check via the input register (0x00), which reports the real pin level even for an
+    // output: LOW while asserted proves the writes reached P7 and it drives the line; HIGH after
+    // release proves the module's pull-up took it back. Logged every reset.
+    uint8_t in = 0xFF;
+    const bool lowOk = exp_read(0x00, &in) && !(in & bit);
     delay(GPS_RESET_PULSE_MS);
     bool released = false;                            // never leave RESET asserted: that would kill GPS
     for (int t = 0; t < 3 && !released; ++t) released = exp_write(0x03, cfg | bit);
+    delay(2);
+    in = 0x00;
+    const bool highOk = released && exp_read(0x00, &in) && (in & bit);
+    Serial.printf("[gps] reset pulse: P7 low=%s released=%s\n", lowOk ? "ok" : "FAIL", highOk ? "ok" : "FAIL");
     return released;
 }
 #else
