@@ -57,6 +57,9 @@
 #define GPS_CFG_RETRY_MS    10000  // re-send the sentence config if not all acked by then
 #define GPS_CFG_TRIES       3      // per reset. Keep writes rare: reportedly ~88 cumulative command
                                    //   writes can corrupt the module's parser (landracer/opendash)
+#define GPS_CFG_MAX_PER_BOOT 10    // hard cap across ALL resets: a module that keeps re-wedging gets
+                                   //   one reset a minute and one config write each, which would
+                                   //   otherwise grind toward that limit over a long session
 #define GPS_CFG_N           4      // commands in GPS_CFG_BODIES
 
 // TinyGPS++ only reads GGA + RMC. GSV (per-satellite detail, several sentences per
@@ -80,6 +83,7 @@ static uint32_t    s_settleUntil = 0;  // no drains before this (module booting 
 static uint16_t    s_resets = 0;       // hardware resets since boot (diagnostics)
 static bool        s_needCfg = false;  // sentence config still to be sent/acked since the last reset
 static uint8_t     s_cfgTries = 0;
+static uint8_t     s_cfgWritesBoot = 0; // sentence-config writes since boot (see GPS_CFG_MAX_PER_BOOT)
 static uint32_t    s_cfgSentMs = 0;
 static uint8_t     s_cfgAcks = 0;      // "$PAIR001,062,0" (success) replies seen since the last send
 static uint8_t     s_ackPos = 0;       // matcher state for those replies in the NMEA stream
@@ -326,9 +330,18 @@ void gps_poll() {
             s_needCfg = false;
             Serial.printf("[gps] sentence config acked (%u/%u)\n", (unsigned)s_cfgAcks, (unsigned)GPS_CFG_N);
         } else if (got > 0 && (s_cfgTries == 0 || now - s_cfgSentMs > GPS_CFG_RETRY_MS)) {
-            if (s_cfgTries < GPS_CFG_TRIES) gps_send_config(now);
-            else { s_needCfg = false; Serial.printf("[gps] sentence config: only %u/%u acked, giving up\n",
-                                                    (unsigned)s_cfgAcks, (unsigned)GPS_CFG_N); }
+            if (s_cfgWritesBoot >= GPS_CFG_MAX_PER_BOOT) {
+                s_needCfg = false;     // the module still works, it just keeps its default (chattier) output
+                Serial.printf("[gps] sentence config: per-boot cap of %u writes reached, not sending\n",
+                              (unsigned)GPS_CFG_MAX_PER_BOOT);
+            } else if (s_cfgTries < GPS_CFG_TRIES) {
+                ++s_cfgWritesBoot;
+                gps_send_config(now);
+            } else {
+                s_needCfg = false;
+                Serial.printf("[gps] sentence config: only %u/%u acked, giving up\n",
+                              (unsigned)s_cfgAcks, (unsigned)GPS_CFG_N);
+            }
         }
     }
     Wire.setTimeOut(BUS_TIMEOUT_MS); Wire.setClock(GPS_BUS_HZ);   // hand the shared bus back to touch/IMU/RTC/PMIC
