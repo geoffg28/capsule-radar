@@ -98,7 +98,7 @@ bool AdsbClient::fetchFrom(int slot, std::vector<Aircraft>& out) {
     // connection but never answers the handshake, that blocks this task for two minutes
     // per provider, and two in a row trip the 180 s restart backstop. A handshake takes
     // well under a second when things work, so give up early and let the next poll retry.
-    client.setHandshakeTimeout(ADSB_TLS_HANDSHAKE_S);
+    client.setHandshakeTimeout(TLS_HANDSHAKE_S);
 
     _pacer.onAttempt(slot, millis());
 
