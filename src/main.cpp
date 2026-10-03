@@ -973,6 +973,8 @@ void setup() {
     // PMIC. Touch (CST9217 indev) + AXP2101 come in later milestones.
     if (!display::begin()) {
         Serial.println("[!] display::begin() failed — check QSPI pins / power.");
+    } else if (display::sweepAvailable()) {
+        radar::setSweepCompositor(display::sweepConfig, display::sweepTick);   // per-pixel sweep (display.cpp)
     }
 
     // restore the saved theme, then persist any future change
