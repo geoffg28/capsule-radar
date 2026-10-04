@@ -44,6 +44,11 @@ static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 #define SWEEP_TRAIL_OPA     72             // trail opacity at the lead edge (fades to 0)
 #define SWEEP_LEAD_OPA      217            // lead line opacity
 #define SWEEP_LEAD_W        2.0f           // compositor: lead line width in pixels (anti-aliased, round ends)
+#define PULSE_PERIOD_MS     2600           // centre ripple: one expansion
+#define PULSE_D_MIN         10             // ring diameter at the start / end of an expansion (px)
+#define PULSE_D_MAX         54
+#define PULSE_W             2              // ring width (px)
+#define PULSE_OPA           220            // ring opacity at the start (fades to 0)
 #define LV_COLOR_DEPTH_BITS 16
 // LCD_COL_OFFSET / LCD_ROW_OFFSET / LCD_QSPI_HZ are panel-specific -> board header.
 #define BRIGHTNESS_DEFAULT  200            // 0..255, panel brightness via cmd 0x51

@@ -90,7 +90,7 @@ static lv_timer_t *s_timer    = nullptr;
 static float       s_sweepDeg = 0.0f;
 // Sweep compositor hooks (device only; main.cpp sets them when display.cpp can draw the
 // sweep per pixel). Unset, e.g. in the SDL simulator, LVGL draws the sweep as before.
-static void (*s_compConfig)(uint16_t ring565, uint16_t lead565, bool wanted) = nullptr;
+static void (*s_compConfig)(uint16_t ring565, uint16_t lead565, uint16_t ink565, bool sweep, bool pulse) = nullptr;
 static void (*s_compTick)() = nullptr;
 static inline void comp_tick() { if (s_compTick) s_compTick(); }   // cheap unless a sweep tick is due
 static float       s_prevSweepDeg = 0.0f;
@@ -541,10 +541,11 @@ static lv_obj_t *make_layer(lv_obj_t *parent, lv_event_cb_t draw_cb) {
 
 static void pulse_anim_cb(void *obj, int32_t v) {
     lv_obj_t *o = (lv_obj_t *)obj;
-    const lv_coord_t dia = 10 + (lv_coord_t)((v * 44) / 100);
+    if (lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN)) return;   // the compositor draws it
+    const lv_coord_t dia = PULSE_D_MIN + (lv_coord_t)((v * (PULSE_D_MAX - PULSE_D_MIN)) / 100);
     lv_obj_set_size(o, dia, dia);
     lv_obj_center(o);
-    lv_obj_set_style_border_opa(o, (lv_opa_t)(220 - v * 220 / 100), 0);
+    lv_obj_set_style_border_opa(o, (lv_opa_t)(PULSE_OPA - v * PULSE_OPA / 100), 0);
 }
 
 namespace radar {
@@ -580,7 +581,6 @@ void setTheme(int t) {
     for (int i = 0; i < 4; ++i) show(s_rose[i], !drg);   // hide compass in Orb
     show(s_rangeLbl, !drg && s_rangeLblVisible);
     show(s_centerDot, !drg);                             // orb draws an orange triangle instead
-    show(s_pulse, !drg);
 
     // retint the persistent chrome objects for the active palette
     if (s_rose[0]) lv_obj_set_style_text_color(s_rose[0], s_cInk, 0);
@@ -600,13 +600,17 @@ void cycleTheme() { setTheme(s_theme + 1); }
 void setThemeChangedCb(void (*cb)(int)) { s_themeCb = cb; }
 void setRangeLabelVisible(bool v) { s_rangeLblVisible = v; if (s_rangeLbl) show(s_rangeLbl, v && !orb()); }
 
-// Show the LVGL sweep, or hand colours + on/off to the compositor when it owns the sweep.
+// Show the LVGL sweep and centre ripple, or hand colours + on/off to the compositor when
+// it owns them.
 static void sweep_sync() {
-    if (s_compConfig) s_compConfig(lv_color_to16(s_cRing), lv_color_to16(s_cLead), s_sweepEnabled && !orb());
+    if (s_compConfig)
+        s_compConfig(lv_color_to16(s_cRing), lv_color_to16(s_cLead), lv_color_to16(s_cInk),
+                     s_sweepEnabled && !orb(), !orb());
     if (s_sweep) {
         show(s_sweep, s_sweepEnabled && !s_compConfig);
         lv_obj_invalidate(s_sweep);            // clear any LVGL wedge currently painted
     }
+    if (s_pulse) show(s_pulse, !orb() && !s_compConfig);   // orb draws an orange triangle instead
 }
 
 void setSweepEnabled(bool on) {
@@ -614,7 +618,7 @@ void setSweepEnabled(bool on) {
     sweep_sync();
 }
 
-void setSweepCompositor(void (*config)(uint16_t ring565, uint16_t lead565, bool wanted), void (*tick)()) {
+void setSweepCompositor(void (*config)(uint16_t ring565, uint16_t lead565, uint16_t ink565, bool sweep, bool pulse), void (*tick)()) {
     s_compConfig = config;
     s_compTick = tick;
     sweep_sync();
@@ -702,14 +706,14 @@ void init(void *lv_parent) {
     lv_obj_set_style_radius(s_pulse, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_opa(s_pulse, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_color(s_pulse, COL_INK, 0);
-    lv_obj_set_style_border_width(s_pulse, 2, 0);
+    lv_obj_set_style_border_width(s_pulse, PULSE_W, 0);
     lv_obj_clear_flag(s_pulse, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     lv_anim_t a;
     lv_anim_init(&a);
     lv_anim_set_var(&a, s_pulse);
     lv_anim_set_exec_cb(&a, pulse_anim_cb);
     lv_anim_set_values(&a, 0, 100);
-    lv_anim_set_time(&a, 2600);
+    lv_anim_set_time(&a, PULSE_PERIOD_MS);
     lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
     lv_anim_start(&a);
 

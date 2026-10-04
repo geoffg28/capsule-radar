@@ -69,7 +69,7 @@ void setSweepEnabled(bool on);                   // show/hide the rotating sweep
 // Hand the sweep to a per-pixel compositor (device: display.cpp). config gets the theme's
 // ring/lead colours (RGB565) and whether a sweep should show; tick is called during long
 // rebuilds so the sweep keeps moving. Without it, LVGL draws the sweep.
-void setSweepCompositor(void (*config)(uint16_t ring565, uint16_t lead565, bool wanted), void (*tick)());
+void setSweepCompositor(void (*config)(uint16_t ring565, uint16_t lead565, uint16_t ink565, bool sweep, bool pulse), void (*tick)());
 bool sweepEnabled();
 void setAirportsEnabled(bool on);                // show/hide airport markers on the scope
 bool airportsEnabled();

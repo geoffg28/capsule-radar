@@ -89,6 +89,15 @@ static int       s_maskN     = 0;
 static uint32_t  s_lastComposeMs = 0;
 static uint32_t  s_swPhase = 0;         // sweep angle in ANG_UNITS << 8 (sub-unit precision)
 #define SWEEP_MAX_STEP_MS (2 * SWEEP_FRAME_MS)   // after a stall, resume instead of jumping ahead
+// Centre ripple (the expanding ring at home), drawn here too so it moves at the sweep's rate.
+static bool      s_pulseWanted = false; // radar_view: the theme has one
+static bool      s_pulseOn   = false;   // a ring is currently on the panel
+static uint16_t  s_pulseInk  = 0xFFFF;
+static uint32_t  s_pulseMs   = 0;       // position in the expansion, 0..PULSE_PERIOD_MS
+static float     s_pulseR    = 0;       // outer radius of the ring on the panel
+static uint32_t  s_pulseOpa  = 0;
+static Rect      s_pulseBox  = {};      // physical box of the ring currently on the panel
+
 
 static inline void rect_grow(Rect &r, const Rect &o) {
     if (!o.valid) return;
@@ -227,6 +236,52 @@ static void sweep_blend(uint16_t *buf, int bx, int by, int stride, Rect r) {
     }
 }
 
+// Blend the centre ring into `buf` (same layout as sweep_blend), limited to `r`. It is
+// centred on the panel centre, which every rotation leaves in place, as LVGL centred it.
+static void pulse_blend(uint16_t *buf, int bx, int by, int stride, Rect r) {
+    const float c = (SCREEN_W - 1) * 0.5f;
+    const float ro = s_pulseR, ri = ro - PULSE_W;
+    for (int y = r.y1; y <= r.y2; ++y) {
+        uint16_t *row = buf + (size_t)(y - by) * stride - bx;
+        const uint8_t *bay = &BAYER4[(y & 3) << 2];
+        const float fy = (float)y - c;
+        // Only the columns within the ring's outer edge and outside its hole need the
+        // per-pixel distance: two spans per row, found with two square roots.
+        const float o2 = (ro + 0.5f) * (ro + 0.5f) - fy * fy;
+        if (o2 <= 0) continue;
+        const float ow = sqrtf(o2);
+        const float i2 = ri > 0.5f ? (ri - 0.5f) * (ri - 0.5f) - fy * fy : 0;
+        const float iw = i2 > 0 ? sqrtf(i2) : -1;
+        const int xa = max(r.x1, (int)floorf(c - ow)), xd = min(r.x2, (int)ceilf(c + ow));
+        const int xb = iw < 0 ? xd : (int)ceilf(c - iw), xc = iw < 0 ? xd + 1 : (int)floorf(c + iw);
+        for (int x = xa; x <= xd; ++x) {
+            if (x > xb && x < xc) { x = xc - 1; continue; }   // jump over the hole
+            const float fx = (float)x - c;
+            const float d = sqrtf(fx * fx + fy * fy);
+            float cov = min(d - ri, ro - d) + 0.5f;      // anti-aliased inner and outer edges
+            if (cov <= 0) continue;
+            if (cov > 1) cov = 1;
+            if (d < 4.5f) cov *= max(d - 3.5f, 0.0f);    // stay under the centre dot (7 px)
+            const uint32_t opa = (uint32_t)(cov * (float)s_pulseOpa);
+            if (opa < 2) continue;
+            bool masked = false;
+            for (int i = 0; i < s_maskN && !masked; ++i) {
+                const Rect &b = s_mask[i].box;
+                masked = x >= b.x1 && x <= b.x2 && y >= b.y1 && y <= b.y2 && mask_hit(s_mask[i], x, y);
+            }
+            if (!masked) row[x] = blend565(row[x], s_pulseInk, opa, bay[x & 3]);
+        }
+    }
+}
+
+static Rect pulse_box(float ro) {
+    const int c = (SCREEN_W - 1) / 2, e = (int)ceilf(ro) + 2;
+    Rect r = { (c - e) & ~1, (c - e) & ~1, (c + e + 1) | 1, (c + e + 1) | 1, true };
+    r.x1 = max(r.x1, 0); r.y1 = max(r.y1, 0);
+    r.x2 = min(r.x2, SCREEN_W - 1); r.y2 = min(r.y2, SCREEN_H - 1);
+    return r;
+}
+
 // Physical box of the wedge at angle `u`, padded and aligned for the CO5300 (even start,
 // odd end).
 static Rect wedge_box(int u) {
@@ -265,6 +320,11 @@ static void draw_block(int16_t x, int16_t y, lv_color_t *pixels, uint16_t w, uin
             const Rect r = rect_and(blk, s_wedge);
             if (r.valid) sweep_blend(px, x, y, w, r);
         }
+        if (s_pulseOn) {
+            const Rect blk = { x, y, x + w - 1, y + h - 1, true };
+            const Rect r = rect_and(blk, s_pulseBox);
+            if (r.valid) pulse_blend(px, x, y, w, r);
+        }
     }
     panel_push(x, y, px, w, h);
 }
@@ -281,6 +341,11 @@ static void push_region(Rect reg) {
             const Rect chunk = { reg.x1, y, reg.x2, y + rows - 1, true };
             const Rect b = rect_and(chunk, s_wedge);
             if (b.valid) sweep_blend(s_compBuf, reg.x1, y, w, b);
+        }
+        if (s_pulseOn) {
+            const Rect chunk = { reg.x1, y, reg.x2, y + rows - 1, true };
+            const Rect b = rect_and(chunk, s_pulseBox);
+            if (b.valid) pulse_blend(s_compBuf, reg.x1, y, w, b);
         }
         panel_push((int16_t)reg.x1, (int16_t)y, s_compBuf, (uint16_t)w, (uint16_t)rows);
     }
@@ -312,33 +377,47 @@ static bool sweep_ready() { return s_phys && s_angMap && s_compBuf; }
 
 static void compose_step() {
     if (!sweep_ready()) return;
-    const bool on = s_swWanted && s_swVisible;
-    if (!on) {
-        if (s_wedgeOn) {                       // take the wedge off the panel once
-            s_wedgeOn = false;
-            push_region(s_wedge);
-            s_wedge.valid = false;
-        }
-        return;
-    }
+    const bool on  = s_swWanted && s_swVisible;
+    const bool pOn = s_pulseWanted && s_swVisible;
+    if (!on && !pOn && !s_wedgeOn && !s_pulseOn) return;
     const uint32_t now = millis();
-    if (s_wedgeOn && now - s_lastComposeMs < SWEEP_FRAME_MS) return;
+    const bool changed = on != s_wedgeOn || pOn != s_pulseOn;
+    if (!changed && now - s_lastComposeMs < SWEEP_FRAME_MS) return;
     // Advance by elapsed time, but never more than SWEEP_MAX_STEP_MS per tick: a blocked
     // loop (GPS read, full repaint) then pauses the sweep briefly instead of making it jump.
-    uint32_t dt = s_wedgeOn ? now - s_lastComposeMs : 0;
+    uint32_t dt = (s_wedgeOn || s_pulseOn) ? now - s_lastComposeMs : 0;
     if (dt > SWEEP_MAX_STEP_MS) dt = SWEEP_MAX_STEP_MS;
     s_lastComposeMs = now;
-    s_swPhase = (s_swPhase + (uint32_t)(((uint64_t)dt * ANG_UNITS * 256) / SWEEP_COMP_PERIOD_MS)) & (ANG_UNITS * 256 - 1);
-    const int u = (int)((s_swPhase >> 8) + ((uint32_t)s_rot * ANG_UNITS) / 360) & (ANG_UNITS - 1);
-    Rect reg = s_wedgeOn ? s_wedge : Rect{};
-    const Rect nw = wedge_box(u);
-    rect_grow(reg, nw);
-    s_angU = u;
-    const float a = (float)u * (2.0f * (float)M_PI / (float)ANG_UNITS);
-    s_leadUx = sinf(a); s_leadUy = -cosf(a);   // 0 = up, clockwise, as in the bearing map
-    s_wedge = nw;
-    s_wedgeOn = true;
-    push_region(reg);                          // old wedge area restored, new wedge drawn
+
+    // Old + new boxes, pushed separately: their union would be mostly empty.
+    Rect regW = s_wedgeOn ? s_wedge : Rect{};
+    Rect regP = s_pulseOn ? s_pulseBox : Rect{};
+    if (on) {
+        s_swPhase = (s_swPhase + (uint32_t)(((uint64_t)dt * ANG_UNITS * 256) / SWEEP_COMP_PERIOD_MS)) & (ANG_UNITS * 256 - 1);
+        const int u = (int)((s_swPhase >> 8) + ((uint32_t)s_rot * ANG_UNITS) / 360) & (ANG_UNITS - 1);
+        const Rect nw = wedge_box(u);
+        rect_grow(regW, nw);
+        s_angU = u;
+        const float a = (float)u * (2.0f * (float)M_PI / (float)ANG_UNITS);
+        s_leadUx = sinf(a); s_leadUy = -cosf(a);   // 0 = up, clockwise, as in the bearing map
+        s_wedge = nw;
+    } else {
+        s_wedge.valid = false;
+    }
+    s_wedgeOn = on;
+    if (pOn) {
+        s_pulseMs = (s_pulseMs + dt) % PULSE_PERIOD_MS;
+        const float f = (float)s_pulseMs / (float)PULSE_PERIOD_MS;
+        s_pulseR = (PULSE_D_MIN + f * (PULSE_D_MAX - PULSE_D_MIN)) * 0.5f;
+        s_pulseOpa = (uint32_t)((1.0f - f) * PULSE_OPA);
+        s_pulseBox = pulse_box(s_pulseR);
+        rect_grow(regP, s_pulseBox);
+    } else {
+        s_pulseBox.valid = false;
+    }
+    s_pulseOn = pOn;
+    push_region(regW);                         // old wedge area restored, new wedge drawn
+    push_region(regP);                         // the same for the ring
 }
 
 // Render the physical bounding box affected by a logical dirty rectangle. Sampling
@@ -617,10 +696,12 @@ void loop() {
     compose_step();
 }
 
-void sweepConfig(uint16_t ring565, uint16_t lead565, bool wanted) {
+void sweepConfig(uint16_t ring565, uint16_t lead565, uint16_t ink565, bool sweep, bool pulse) {
     s_swRing = ring565;
     s_swLead = lead565;
-    s_swWanted = wanted;
+    s_swWanted = sweep;
+    s_pulseInk = ink565;
+    s_pulseWanted = pulse;
 }
 void sweepTick() { compose_step(); }
 bool sweepAvailable() { return sweep_ready(); }
@@ -650,6 +731,8 @@ void setRotation(uint16_t degrees) {
         memset(s_phys, 0, (size_t)SCREEN_W * SCREEN_H * 2);
         s_wedgeOn = false;
         s_wedge.valid = false;
+        s_pulseOn = false;
+        s_pulseBox.valid = false;
         sweep_build_map();                       // the scope centre moves by a fraction of a pixel
     }
     lv_obj_t *scr = lv_scr_act();
