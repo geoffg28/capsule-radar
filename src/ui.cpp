@@ -308,8 +308,20 @@ void ui_set_netinfo(const char *line) {
     if (s_statsNet && line) lv_label_set_text(s_statsNet, line);
 }
 
+// Which provider served the last aircraft data. Shown on the Stats view so users can tell
+// whether they are on airplanes.live (feeder households) or a fallback — until now that
+// was only visible on the serial log, and it kept coming up in support threads.
+static char s_feedHost[40] = "-";
+void ui_set_feed_source(const char *host) {
+    if (!host || !host[0] || host[0] == '?') { snprintf(s_feedHost, sizeof(s_feedHost), "-"); return; }
+    // strip the machine prefixes so the label reads like the project name users know
+    if      (strncmp(host, "api.",      4) == 0) host += 4;
+    else if (strncmp(host, "opendata.", 9) == 0) host += 9;
+    snprintf(s_feedHost, sizeof(s_feedHost), "%s", host);
+}
+
 // GPS indicator. state: 0 = off / no module (hidden), 1 = acquiring (amber), 2 = fix (green).
-void ui_set_gps(int state, int sats) {
+void ui_set_gps(int state, int sats, float altM) {
     if (state <= 0) {                                 // hidden when GPS auto-location is off
         if (s_hudGps)   lv_label_set_text(s_hudGps, "");
         if (s_statsGps) lv_label_set_text(s_statsGps, "");
@@ -324,8 +336,14 @@ void ui_set_gps(int state, int sats) {
         lv_obj_set_style_text_color(s_hudGps, col, 0);
     }
     if (s_statsGps) {
-        char s[40];
-        if (fix) snprintf(s, sizeof(s), LV_SYMBOL_GPS " fix  " LV_SYMBOL_BULLET "  %d sats", sats);
+        char s[56];
+        if (fix && altM == altM) {                    // fix with a known GPS altitude
+            char altS[16];
+            if (s_units == 1) snprintf(altS, sizeof(altS), "%.0f m",  altM);
+            else              snprintf(altS, sizeof(altS), "%.0f ft", altM * 3.28084f);
+            snprintf(s, sizeof(s), LV_SYMBOL_GPS " fix  " LV_SYMBOL_BULLET "  %d sats  " LV_SYMBOL_BULLET "  %s", sats, altS);
+        }
+        else if (fix) snprintf(s, sizeof(s), LV_SYMBOL_GPS " fix  " LV_SYMBOL_BULLET "  %d sats", sats);
         else     snprintf(s, sizeof(s), LV_SYMBOL_GPS " acquiring  (%d sats)", sats);
         lv_label_set_text(s_statsGps, s);
         lv_obj_set_style_text_color(s_statsGps, col, 0);
@@ -369,16 +387,17 @@ static void build_stats(void) {
     }
     char altH[16];
     fmt_alt(altH, sizeof(altH), (highest > -1e8f) ? highest : 0.0f, false);
-    char st[220];
+    char st[260];
     snprintf(st, sizeof(st),
              "Aircraft   %d\n"
              "Emergency  %d\n"
              "Nearest    %s\n"
              "           %.1f %s\n"
              "Highest    %s\n"
-             "Range      %.0f %s",
+             "Range      %.0f %s\n"
+             "Feed       %s",
              n, emg, n ? nearestCall : "-", dist_val(n ? nearest : 0.0f), dist_unit(),
-             altH, dist_val(s_rangeKm), dist_unit());
+             altH, dist_val(s_rangeKm), dist_unit(), s_feedHost);
     lv_label_set_text(s_statsLbl, st);
 }
 
@@ -518,7 +537,14 @@ static void build_weather(void) {
         s_weatherMode == WEATHER_CLOUDS ? "SAT CLOUDS" : "WEATHER");
 }
 
+// Registered once, on the whole weather panel (see ui_create) -- the mode pill and the
+// image are deliberately non-clickable so every tap funnels here. The debounce swallows
+// repeats from a held press, and a duplicate should another target ever be added back.
 static void weather_mode_cb(lv_event_t *) {
+    static uint32_t last = 0;
+    const uint32_t now = lv_tick_get();
+    if (now - last < 250) return;
+    last = now;
     s_weatherMode = (WeatherViewMode)(((int)s_weatherMode + 1) % 3);
     build_weather();
 }
@@ -529,6 +555,37 @@ void ui_set_weather_forecast(bool forecast) {
 }
 
 // Rebuild whichever of list/stats is currently on screen (called on poll and on swipe).
+static void (*s_viewChangedCb)(int) = nullptr;
+void ui_set_view_changed_cb(void (*cb)(int idx)) { s_viewChangedCb = cb; }
+
+// Sweep compositor hooks (polled by display.cpp every loop pass).
+bool ui_sweep_visible(void) {
+    return s_tv && lv_tileview_get_tile_act(s_tv) == s_tileRadar && !lv_obj_is_scrolling(s_tv);
+}
+
+int ui_sweep_masks(int16_t out[][5], int max) {
+    lv_obj_t *objs[4] = { s_card, s_photo, s_photoCredit, s_zoomBtn };   // detail card, its photo, range button
+    int n = 0;
+    for (lv_obj_t *o : objs) {
+        if (n >= max || !o || lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN)) continue;
+        lv_area_t a;
+        lv_obj_get_coords(o, &a);
+        out[n][0] = a.x1; out[n][1] = a.y1; out[n][2] = a.x2; out[n][3] = a.y2;
+        out[n][4] = lv_obj_get_style_radius(o, LV_PART_MAIN);
+        n++;
+    }
+    return n;
+}
+
+static int active_view_index(void) {
+    if (!s_tv) return 0;
+    lv_obj_t *act = lv_tileview_get_tile_act(s_tv);
+    if (act == s_tileList)    return 1;
+    if (act == s_tileStats)   return 2;
+    if (act == s_tileWeather) return 3;
+    return 0;
+}
+
 static void refresh_active_tile(void) {
     if (!s_tv) return;
     lv_obj_t *act = lv_tileview_get_tile_act(s_tv);
@@ -708,7 +765,10 @@ void ui_create(void) {
     s_tileWeather = lv_tileview_add_tile(s_tv, 3, 0, LV_DIR_LEFT);
     // Rebuild the list/stats with the latest data the moment they slide into view
     // (between polls they'd otherwise show whatever was there when last visible).
-    lv_obj_add_event_cb(s_tv, [](lv_event_t *) { refresh_active_tile(); }, LV_EVENT_VALUE_CHANGED, nullptr);
+    lv_obj_add_event_cb(s_tv, [](lv_event_t *) {
+        refresh_active_tile();
+        if (s_viewChangedCb) s_viewChangedCb(active_view_index());   // let main remember the last view
+    }, LV_EVENT_VALUE_CHANGED, nullptr);
 
     // --- radar tile ---
     lv_obj_clear_flag(s_tileRadar, LV_OBJ_FLAG_SCROLLABLE);
@@ -831,6 +891,17 @@ void ui_create(void) {
 
     // --- weather tile (current conditions + next three days) ---
     lv_obj_t *wp = make_round_panel(s_tileWeather);
+    // The entire view cycles the weather mode: there is nothing else to touch here, and a
+    // 34px pill 18px from the bottom of a ROUND panel is a genuinely hard target -- measured
+    // presses aimed at it landed a few px low, outside it, and read as the button ignoring
+    // you. Everything below is left non-clickable so all taps funnel here.
+    //
+    // CLICKED, not PRESSED: this panel scroll-chains to the tileview, so dragging across it
+    // is how you swipe off the view. On PRESSED every such swipe would also cycle the mode.
+    // Cancel-on-scroll is exactly what a full-screen target wants -- and the finger drift
+    // that made CLICKED unreliable on a small pill no longer matters now position does not.
+    lv_obj_add_flag(wp, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(wp, weather_mode_cb, LV_EVENT_CLICKED, nullptr);
     lv_obj_set_style_bg_color(wp, lv_color_black(), 0); // hide square radar-tile bounds on AMOLED
     s_weatherTitle = make_tile_title(wp, "WX RADAR");
     lv_obj_set_style_bg_color(s_weatherTitle, lv_color_black(), 0);
@@ -884,8 +955,8 @@ void ui_create(void) {
     s_wxCanvas = lv_canvas_create(wp);
     lv_obj_set_size(s_wxCanvas, WX_RADAR_SIZE, WX_RADAR_SIZE);
     lv_obj_align(s_wxCanvas, LV_ALIGN_TOP_MID, 0, 52);
-    lv_obj_add_flag(s_wxCanvas, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_wxCanvas, weather_mode_cb, LV_EVENT_CLICKED, nullptr);
+    // Not clickable: taps pass through to the panel, which owns the whole view.
+    lv_obj_clear_flag(s_wxCanvas, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(s_wxCanvas, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_background(s_wxCanvas);
 
@@ -1019,7 +1090,9 @@ void ui_create(void) {
     lv_obj_set_style_border_color(s_weatherModeBtn, UI_GREEN, 0);
     lv_obj_set_style_border_width(s_weatherModeBtn, 1, 0);
     lv_obj_clear_flag(s_weatherModeBtn, LV_OBJ_FLAG_SCROLL_CHAIN);
-    lv_obj_add_event_cb(s_weatherModeBtn, weather_mode_cb, LV_EVENT_CLICKED, nullptr);
+    // Purely a label showing which mode comes next -- the panel handles the tap, so this
+    // must NOT be clickable or it would swallow presses that land on it.
+    lv_obj_clear_flag(s_weatherModeBtn, LV_OBJ_FLAG_CLICKABLE);
     s_weatherModeLbl = lv_label_create(s_weatherModeBtn);
     lv_obj_set_style_text_font(s_weatherModeLbl, F12(), 0);
     lv_obj_set_style_text_color(s_weatherModeLbl, UI_GREEN, 0);

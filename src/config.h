@@ -1,9 +1,7 @@
 #pragma once
 // Capsule Radar — build & user configuration.
 
-#define FW_VERSION "1.3.25"   // shown on the web config page + Stats screen; bump on release
-// Edit pins below: replace every -1 with the value from the Waveshare factory demo
-// (see docs/HARDWARE.md and docs/SETUP.md). Do NOT guess them.
+#define FW_VERSION "1.4.8"   // shown on the web config page + Stats screen; bump on release
 
 // ---------- Home location (default: Dénia, Spain) ----------
 // Overridable at runtime via the captive portal (stored in NVS).
@@ -35,68 +33,81 @@ static const float RANGE_STEPS_KM[] = {5.0f * NM_TO_KM, 10.0f * NM_TO_KM, 15.0f 
 #define WX_RADAR_REFRESH_MS 300000UL       // RainViewer frames update about every 5 minutes
 #define CLOUD_IMAGE_REFRESH_MS 600000UL    // EUMETSAT MTG cloud imagery; cache for 10 minutes
 
-// ---------- Screen (CO5300 AMOLED) ----------
+// ---------- Screen (CO5300 AMOLED, 466x466 on every supported board) ----------
 #define SCREEN_W            466
 #define SCREEN_H            466
 #define SCREEN_CX           233
 #define SCREEN_CY           233
 #define RADAR_R_OUTER_PX    218            // outer ring radius in pixels
+// radar sweep (radar_view.cpp draws it in LVGL; display.cpp's compositor draws it per pixel)
+#define SWEEP_PERIOD_MS     8000           // one revolution (LVGL sweep)
+#define SWEEP_COMP_PERIOD_MS 40000         // one revolution when the compositor draws it (a slower sweep hides the
+                                           // brief pauses while LVGL rebuilds the scope after a poll)
+#define SWEEP_FRAME_MS      30             // sweep tick
+#define SWEEP_TRAIL_DEG     38.0f          // fading trail behind the lead line
+#define SWEEP_TRAIL_STEPS   20             // LVGL sweep: lines in the trail
+#define SWEEP_TRAIL_OPA     72             // trail opacity at the lead edge (fades to 0)
+#define SWEEP_LEAD_OPA      217            // lead line opacity
+#define SWEEP_LEAD_W        2.0f           // compositor: lead line width in pixels (anti-aliased, round ends)
+#define PULSE_PERIOD_MS     2600           // centre ripple: one expansion
+#define PULSE_D_MIN         10             // ring diameter at the start / end of an expansion (px)
+#define PULSE_D_MAX         54
+#define PULSE_W             2              // ring width (px)
+#define PULSE_OPA           220            // ring opacity at the start (fades to 0)
 #define LV_COLOR_DEPTH_BITS 16
-#define LCD_COL_OFFSET      6              // CO5300 column (x) gap on this panel (esp_lcd set_gap 0x06)
-#define LCD_ROW_OFFSET      0              // no row (y) gap
-#define LCD_QSPI_HZ         80000000       // CO5300 QSPI clock (vendor uses 40 MHz; 80 = faster, verify no artifacts)
+// LCD_COL_OFFSET / LCD_ROW_OFFSET / LCD_QSPI_HZ are panel-specific -> board header.
 #define BRIGHTNESS_DEFAULT  200            // 0..255, panel brightness via cmd 0x51
 #define TZ_STR              "CET-1CEST,M3.5.0,M10.5.0/3"  // POSIX TZ (Spain) for local time/date
 #define BRIGHTNESS_IDLE     25             // dimmed after no touch for IDLE_DIM_MS
 #define IDLE_DIM_MS         20000          // dim the screen after this long without a touch
 
 // ---------- ADS-B API (free, non-commercial) ----------
+// Providers are tried in this order; each is paced independently (see AdsbClient).
+// All three return the same readsb shape (an "ac" array), but NOT the same URL path,
+// so each carries its own template in the provider table in adsb_client.cpp.
 #define ADSB_PRIMARY_HOST   "api.airplanes.live"   // GET /v2/point/{lat}/{lon}/{radius_nm}
-#define ADSB_FALLBACK_HOST  "api.adsb.lol"          // same readsb format
-#define ADSB_USER_AGENT     "CapsuleRadar/1.0 (ESP32-S3 hobby; +https://github.com/socquique/capsule-radar)"
+                                                    //   now requires prior approval by email
+#define ADSB_OPENDATA_HOST  "opendata.adsb.fi"     // GET /api/v3/lat/{lat}/lon/{lon}/dist/{nm}
+                                                    //   documented 1 req/s; personal use only,
+                                                    //   attribution required (see docs/DATA_SOURCE.md)
+#define ADSB_FALLBACK_HOST  "api.adsb.lol"          // same readsb format; limits are dynamic
+#define ADSB_PROVIDER_COUNT 3
+// Sent with setUserAgent(), never addHeader() — see the note in docs/DATA_SOURCE.md.
+// Carries FW_VERSION: now that the header actually goes out, and adsb.lol checks it for
+// valid contact info, a provider should be able to tell which build is talking to them.
+#define ADSB_USER_AGENT     "CapsuleRadar/" FW_VERSION " (ESP32-S3 hobby; +https://github.com/socquique/capsule-radar)"
 #define ADSB_HTTPS_INSECURE 1               // 1 = setInsecure() (hobby). 0 = use pinned root CA.
+#define TLS_HANDSHAKE_S     10              // TLS handshake timeout for every HTTPS client, seconds (core default is 120)
 #define ADSB_MAX_AIRCRAFT   60              // hard cap parsed per poll (protect RAM in busy areas)
+// How long to stop asking a provider that refused us. 403 is a policy refusal (needs
+// approval, or a User-Agent they reject) and will not clear in seconds; 429 just means
+// we were too fast. Without these, a permanently-403 provider is retried every poll,
+// which doubles the request rate onto the surviving provider and trips ITS rate limit.
+#define ADSB_COOLDOWN_403_MS  900000UL      // first park after a policy refusal (15 min)
+#define ADSB_COOLDOWN_403_MAX_MS 21600000UL // cap for the escalating 403 park (6 h) — see AdsbPacer::onRefused
+#define ADSB_SPACING_STEP_MS    4000UL      // first extra gap imposed after a 429
+#define ADSB_SPACING_MAX_MS    60000UL      // never space a provider out further than this
+#define ADSB_SPACING_EASE_OKS       3       // successes needed before easing the gap back down
+#define ADSB_FEED_STALE_MS     60000UL      // no successful fetch for this long -> HUD warning
 
 // ---------- Debug ----------
 #define DEBUG_MEM           0               // 1 = print a [mem] heap/fps line every 5s on serial
 
-// ---------- Pin map ----------
-// VERIFIED (ESPHome def, cross-checked against the Waveshare board definition in
-// xiaozhi-esp32 and a working Arduino_GFX port for this exact panel):
-#define PIN_LCD_CS          12
-#define PIN_LCD_RST         39
-#define PIN_TP_INT          11
-#define PIN_TP_RST          40
-#define TP_MIRROR_X         true
-#define TP_MIRROR_Y         true
+// ---------- Board ----------
+// The pin map, panel gaps, touch driver and which peripherals exist all live in a
+// per-board header. Select one with a build flag in platformio.ini; the 1.75 is the
+// default so an unflagged build behaves exactly as before.
+//   -DBOARD_AMOLED_143  -> Waveshare ESP32-S3-Touch-AMOLED-1.43
+//   (none)              -> Waveshare ESP32-S3-Touch-AMOLED-1.75  (reference board)
+// Never guess pins for a new board: take them from the vendor demo or the Arduino
+// core board variant, then confirm them on hardware before committing.
+#if defined(BOARD_AMOLED_143)
+#  include "boards/board_amoled_143.h"
+#else
+#  include "boards/board_amoled_175.h"
+#endif
 
-// CONFIRMED — CO5300 QSPI databus (LCD_CS=12, LCD_RST=39 above match too):
-#define PIN_LCD_SCLK        38             // QSPI PCLK
-#define PIN_LCD_D0          4
-#define PIN_LCD_D1          5
-#define PIN_LCD_D2          6
-#define PIN_LCD_D3          7
-
-// CONFIRMED — shared I2C bus (touch + IMU + RTC + PMIC + audio codec):
-#define PIN_I2C_SDA         15
-#define PIN_I2C_SCL         14
-
-// CONFIRMED — ES8311 codec over I2S (M4 alert ping). MCLK/DIN/PA included for completeness:
-#define PIN_I2S_MCLK        42
-#define PIN_I2S_BCLK        9
-#define PIN_I2S_LRCLK       45             // a.k.a. WS
-#define PIN_I2S_DOUT        8              // ESP32 -> codec (speaker)
-#define PIN_I2S_DIN         10             // codec -> ESP32 (mics)
-#define PIN_AUDIO_PA        46             // speaker amp enable
-#define PIN_BOOT_BUTTON     0              // BOOT button (held on boot = captive portal, later)
-
-// I2C addresses:
-#define I2C_ADDR_TOUCH      0x5A           // CST9217 (corrected from vendor driver; was 0x15)
-#define I2C_ADDR_IMU        0x6B
-#define I2C_ADDR_RTC        0x51
-#define I2C_ADDR_PMIC       0x34
-
-// Safety net: should never fire now that pins are filled in. Keeps future edits honest.
+// Safety net: catches a board header that still has placeholder pins in it.
 #if (PIN_LCD_SCLK < 0) || (PIN_I2C_SDA < 0)
-#  error "config.h: QSPI/I2C pins are back to placeholders (-1). Restore the real values."
+#  error "board header: QSPI/I2C pins are placeholders (-1). Fill in the real values."
 #endif

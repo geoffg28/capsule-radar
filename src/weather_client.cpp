@@ -20,6 +20,7 @@ bool weather_fetch(double lat, double lon, WeatherSnapshot &out) {
 
     WiFiClientSecure client;
     client.setInsecure();
+    client.setHandshakeTimeout(TLS_HANDSHAKE_S);  // core default is 120 s; see TLS_HANDSHAKE_S
     HTTPClient http;
     http.setReuse(false);
     http.setConnectTimeout(3500);
@@ -28,7 +29,9 @@ bool weather_fetch(double lat, double lon, WeatherSnapshot &out) {
         Serial.println("[weather] HTTP begin failed");
         return false;
     }
-    http.addHeader("User-Agent", ADSB_USER_AGENT);
+    // MUST be setUserAgent(): addHeader() silently drops User-Agent (it is on
+    // HTTPClient's "handled by code" list), leaving the default "ESP32HTTPClient".
+    http.setUserAgent(ADSB_USER_AGENT);
 
     const int status = http.GET();
     if (status != 200) {
