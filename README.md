@@ -30,17 +30,18 @@ A live **ADS-B aircraft radar** for the **Waveshare ESP32-S3-Touch-AMOLED-1.75**
 ## Features
 
 - **Live traffic** from [airplanes.live](https://airplanes.live), [adsb.fi](https://adsb.fi/) and [adsb.lol](https://adsb.lol) (free, non-commercial), updated every couple of seconds. Each provider is paced independently, so one refusing or rate-limiting does not stop the feed. Memory-safe streaming parser with a hard aircraft cap. *Note: airplanes.live is now [contributor-only](https://airplanes.live/get-started/) — if you run one of their feeders, your radar uses their API automatically from the same network (no keys, nothing to configure); otherwise it quietly falls back to adsb.fi / adsb.lol.*
-- **Four themes** (long-press the screen to cycle, or pick on the web; remembered across reboots):
+- **Four themes** (hold the radar still for 1.5 s, then lift, to cycle; or pick on the web; remembered across reboots):
   - **Phosphor** — green-on-black radar scope: rings, animated sweep, aircraft glyphs rotated by heading and color-coded by altitude, fading trails, emergency halo.
   - **Orb** — green gradient + grid scope: the 7 nearest aircraft as yellow orbs emitting waves, off-range traffic as edge arrows pointing its way, orange target rings.
   - **Amber CRT** and **Military** — the same scope retinted (warm amber / night-vision green).
-- **Touch** (CST9217): tap an aircraft → detail card (callsign, type, altitude, vertical speed, ground speed, distance, heading, squawk). **Double-tap** to cycle zoom range. Swipe between **Radar / List / Stats** (circular layouts).
-- **Boot splash** + **alert pings** (ES8311 speaker): a soft ping when a new aircraft enters range, an urgent double-beep for emergency/military — volume & mute on the web page.
+- **Touch** (CST9217): tap an aircraft → detail card (callsign, type, altitude, vertical speed, ground speed, distance, ground track (HDG), squawk); the X in its corner, a tap just outside the card, or a tap on empty scope closes it. The on-screen zoom button cycles the zoom range (5 / 10 / 15 / 20 / 50 NM, same list on the web page). Swipe between **Radar / List / Stats** (circular layouts).
+- **Boot splash** + **alert pings** (ES8311 speaker): a soft ping when a new aircraft enters range, an urgent double-beep for emergency/military — volume & mute on the web page. The LCD 2.1 beeps the same alerts on its buzzer (mute only).
 - **Smooth motion**: aircraft glyphs glide between polls (interpolated) instead of jumping, using cheap partial redraws.
 - **Top HUD**: WiFi status (amber if the data feed is failing), in-range aircraft count, NTP/RTC clock, **battery %** (charging bolt, red when low), and the date. The Stats view footer shows how to reach the config page (`capsuleradar.local` + IP).
 - **Battery aware** (AXP2101): shows charge level, warns when low, and slows the feed poll rate on battery to save power.
 - **Real-time clock** (PCF85063): keeps the time/date across power loss, so the clock is right even before/without WiFi; re-synced from NTP when online.
-- **Smart brightness**: configurable idle auto-dim (no touch), and **face-down sleep** (QMI8658 IMU — flip it over to turn the screen off).
+- **Smart brightness**: configurable idle auto-dim (no touch), and **face-down sleep** (QMI8658 IMU — flip it over to turn the screen off; a touch or turning it back up wakes it).
+- **Idle clock**: instead of dimming, the radar turns into an analog clock when nobody touches it — the sweep line spins onto the current second and becomes the second hand, the hour and minute hands grow out of the centre, N/E/S/W become 12/3/6/9, and the planes keep moving behind it, dimmed. A touch brings the radar back (that touch does nothing else), and so does an emergency squawk in range. The web page's "Clock or dim after" setting sets the wait; a web switch turns the clock off.
 - **GPS auto-location** (optional **-G** board variant): the Waveshare `-G` board has an onboard GPS (Quectel LC76G). Turn it on from the web page and the radar **sets its own center point automatically**, with an on-screen **satellite status icon** (amber while acquiring, green once it has a fix). Standard boards simply enter their location manually.
 - **Configuration web page** at `http://capsuleradar.local/` — center point (map picker), display range, theme, **time zone** (auto-detected from your browser), live brightness slider, sound, WiFi reset, and over-the-air firmware update. Settings persist in NVS.
 - **First-boot WiFi setup** via a captive portal (`CapsuleRadar-Setup`).
@@ -61,6 +62,35 @@ The Waveshare **ESP32-S3-Touch-AMOLED-1.43** is also supported in-tree. Same SoC
 | Battery / audio | AXP2101 / ES8311 | not fitted |
 
 Pin maps live in [`src/boards/`](src/boards/), one header per board, selected by a `-DBOARD_*` build flag. They are taken from the vendor board definition and then **confirmed on hardware** — never guessed. Shared tunables stay in [`src/config.h`](src/config.h).
+
+### Waveshare ESP32-S3-Touch-LCD-2.1 (experimental)
+
+Contributed by @alexzogh in #45. **Experimental:** touch, WiFi, the feed and web updates work.
+Since 1.7.0 the panel streams through bounce buffers with a real page flip, which fixed the
+sideways picture shift ([#49](https://github.com/socquique/capsule-radar/issues/49)) and the
+tearing (#54).
+
+**Built the 2.1 locally before 1.7.0?** Settings already in the generated
+`sdkconfig.esp32-s3-lcd-21` win over `custom_sdkconfig` in `platformio.ini`, so delete that
+file, build any AMOLED board once (e.g. `pio run -e esp32-s3-amoled-175`, which puts back the
+stock framework libraries), then build the 2.1 again. Otherwise the build succeeds but keeps
+the old panel settings. Fresh clones and CI are not affected.
+
+The 2.1-inch board uses a 480×480 ST7701 RGB IPS panel, CST820 touch, and a
+TCA9554 GPIO expander. Its pin map and timings live in `src/boards/board_lcd_21.h`.
+It has no PMIC or audio codec, so there is no battery reporting; the alerts beep on its
+onboard buzzer instead (mute on the web page, no volume).
+
+Build with `pio run -e esp32-s3-lcd-21`; upload over USB with `-t upload`, or use
+`pio run -e esp32-s3-lcd-21-ota -t upload` once connected to WiFi.
+Release assets include `CapsuleRadar-esp32s3-lcd21.bin` (merged USB image at 0x0)
+and `CapsuleRadar-ota-lcd21.bin` (app-only image for the device's web update page).
+The browser flasher currently supports the AMOLED boards.
+
+The LCD environment rebuilds ESP-IDF with its own RGB-panel settings (`custom_sdkconfig`),
+so its first build takes longer than the AMOLED environments. Since 1.8.0 it uses the
+same sweep compositor as the AMOLED boards, with partial refresh at 0/90/180/270 degrees
+(#60): the sweep turns smoothly and quick taps register first time.
 
 ### Where to buy the board
 
@@ -130,7 +160,7 @@ src/
   imu_qmi8658.*      accelerometer (face-down sleep)
   battery.*          AXP2101 battery gauge
   rtc_pcf85063.*     PCF85063 real-time clock
-  adsb_client.*      airplanes.live fetch + parse
+  adsb_client.*      airplanes.live / adsb.fi / adsb.lol fetch + parse (with adsb_pacing.h)
   sim_main.cpp       native SDL simulator (not flashed)
 include/lv_conf.h    LVGL config (v8)
 web/flash/           browser web-flasher (ESP Web Tools) for makers
@@ -140,9 +170,9 @@ docs/                hardware / data-source / architecture notes
 
 ## Community ports & forks
 
-The reference board is the **Waveshare ESP32-S3-Touch-AMOLED-1.75**, but other boards are welcome upstream: a port contributed as a pull request (its own PlatformIO env + board header in [`src/boards/`](src/boards/)) gets built by the CI on every release alongside the 1.75 — the in-tree **1.43** port is the worked example to copy, and the 2.1" port below is on that path. Ports that prefer to stay independent live as forks, linked here (MIT: fork away, and tell me so I can add yours).
+The reference board is the **Waveshare ESP32-S3-Touch-AMOLED-1.75**, but other boards are welcome upstream: a port contributed as a pull request (its own PlatformIO env + board header in [`src/boards/`](src/boards/)) gets built by the CI on every release alongside the 1.75 — the in-tree **1.43** port is the worked example to copy, and the **2.1"** port by @alexzogh is now in-tree too (experimental, above). Ports that prefer to stay independent live as forks, linked here (MIT: fork away, and tell me so I can add yours).
 
-- **[Capsule Radar for the Waveshare ESP32-S3-Touch-LCD-2.1](https://github.com/alexzogh/capsule-radar/tree/port/esp32-s3-lcd-21)** by **@alexzogh (STLWarehouse)** — a full port to the 2.1" round LCD (ST7701), plus new features: **double-tap to track an aircraft** (scope re-centres on it), a **clock face on idle**, and the busy-airspace **query-radius fix** now merged back into this firmware. Ships its own binaries per release (files with `lcd21` in the name are the 2.1 builds).
+- **[Capsule Radar for the Waveshare ESP32-S3-Touch-LCD-2.1](https://github.com/alexzogh/capsule-radar/tree/port/esp32-s3-lcd-21)** by **@alexzogh (STLWarehouse)** — a full port to the 2.1" round LCD (ST7701), plus new features: **double-tap to track an aircraft** (scope re-centres on it), a **clock face on idle**, and the busy-airspace **query-radius fix** now merged back into this firmware. The board itself is now built in-tree with every release (files with `lcd21` in the name); the fork keeps its extra features.
 - **[Capsule Radar for the Waveshare 2.8" (non-touch)](https://github.com/ijord/capsule-radar)** by **@ijord** — port to the 2.8" ST7701 panel, with a smoother sweep compositor and the **PNG heap-corruption fix** that shipped upstream in v1.3.28. Thank you!
 - **[Skyglass](https://github.com/SilentWolf75/skyglass)** by **@SilentWolf75** — an independently evolved sibling (190+ commits): **shaded OpenStreetMap basemap rendered on-device** and **ESP32-P4** support.
 

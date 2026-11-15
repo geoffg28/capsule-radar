@@ -13,6 +13,39 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>   // v7
 #include <esp_heap_caps.h>
+#include "lwip/tcpip.h"
+#include "lwip/priv/tcp_priv.h"   // tcp_active_pcbs: lwIP has no public way to list connections
+
+// A provider that accepts the TCP connection and then says nothing (a TLS-inspecting
+// firewall, a captive portal, a lossy link) leaves something behind on every failed
+// request. HTTPClient closes the socket, lwIP sends a FIN with the unacknowledged
+// ClientHello still queued, and that FIN is never answered either. The socket is gone,
+// but lwIP keeps the connection in FIN_WAIT_1, retransmitting with exponential backoff
+// until TCP_MAXRTX gives up: about 39 minutes, holding its send buffers all along.
+// A ~3-minute stall at one try per 10 s fills lwIP's whole connection pool (16), and on
+// boards without lwIP buffers in PSRAM (the LCD 2.1) that is ~2 KB of internal RAM each,
+// at the point where TLS needs internal RAM to recover.
+//
+// Nothing can answer those FINs any more, so after a failed request reset every outgoing
+// HTTPS connection (remote port 443: feeds, route and photo lookups) that has been closed
+// by its owner (callback_arg cleared by the socket layer) and is still waiting for its FIN
+// to be acknowledged. We only close those once we are done with them, so nothing is lost.
+// The web server's own connections are left alone: a page's last bytes may still be in
+// flight when its socket closes.
+// SO_LINGER can't do this: HTTPClient closes inside connect() when TLS fails.
+static unsigned freeStalledConnections() {
+    struct tcp_pcb* stale[MEMP_NUM_TCP_PCB];
+    unsigned n = 0;
+    LOCK_TCPIP_CORE();
+    for (struct tcp_pcb* p = tcp_active_pcbs; p && n < MEMP_NUM_TCP_PCB; p = p->next) {
+        const bool closing = p->state == FIN_WAIT_1 || p->state == FIN_WAIT_2 ||
+                             p->state == CLOSING || p->state == LAST_ACK;
+        if (closing && p->callback_arg == NULL && p->remote_port == 443) stale[n++] = p;
+    }
+    for (unsigned i = 0; i < n; ++i) tcp_abort(stale[i]);   // unlinks; don't walk the list here
+    UNLOCK_TCPIP_CORE();
+    return n;
+}
 
 // Parse the JSON in PSRAM, not internal RAM. Otherwise the per-poll JSON alloc/free
 // churn fragments the internal heap and, after a while, mbedTLS can't find a large
@@ -43,6 +76,11 @@ public:
     int read() override {
         const int value = _source.read();
         if (value >= 0) ++_bytesRead;
+        // timedRead() calls this in a loop with no yield until a byte arrives. If the server
+        // pauses mid-body for more than 5 s, that busy loop starves IDLE0 and the task
+        // watchdog restarts the radar. A 1 ms wait lets the idle task run; the stream
+        // timeout still ends a stalled read.
+        else delay(1);
         return value;
     }
     int peek() override { return _source.peek(); }
@@ -66,11 +104,12 @@ void AdsbClient::begin(double homeLat, double homeLon, float rangeKm) {
 struct AdsbProvider {
     const char* host;
     const char* pathFmt;   // lat, lon, radius-in-nm
+    bool        http10;    // ask in HTTP/1.0 (see fetchFrom for why, and why not adsb.lol)
 };
 static const AdsbProvider kProviders[ADSB_PROVIDER_COUNT] = {
-    { ADSB_PRIMARY_HOST,  "/v2/point/%.4f/%.4f/%.0f"        },
-    { ADSB_OPENDATA_HOST, "/api/v3/lat/%.4f/lon/%.4f/dist/%.0f" },
-    { ADSB_FALLBACK_HOST, "/v2/point/%.4f/%.4f/%.0f"        },
+    { ADSB_PRIMARY_HOST,  "/v2/point/%.4f/%.4f/%.0f",            true  },
+    { ADSB_OPENDATA_HOST, "/api/v3/lat/%.4f/lon/%.4f/dist/%.0f", true  },
+    { ADSB_FALLBACK_HOST, "/v2/point/%.4f/%.4f/%.0f",            false },
 };
 
 bool AdsbClient::poll(std::vector<Aircraft>& out) {
@@ -104,8 +143,10 @@ bool AdsbClient::fetchFrom(int slot, std::vector<Aircraft>& out) {
 #endif
     // The core's default TLS handshake timeout is 120 s. If a server accepts the TCP
     // connection but never answers the handshake, that blocks this task for two minutes
-    // per provider, and two in a row trip the 180 s restart backstop. A handshake takes
-    // well under a second when things work, so give up early and let the next poll retry.
+    // per provider: the radar goes stale for that long, and two in a row pass the feed
+    // watchdog's 180 s mark (feed_watchdog.h), which reboots when the heap is fragmented.
+    // A handshake takes well under a second when things work, so give up early and let
+    // the next poll retry.
     client.setHandshakeTimeout(TLS_HANDSHAKE_S);
 
     _pacer.onAttempt(slot, millis());
@@ -121,7 +162,13 @@ bool AdsbClient::fetchFrom(int slot, std::vector<Aircraft>& out) {
     // parses as a perfectly good JSON number -- a 200 that silently yields no aircraft.
     // HTTP/1.0 makes the body either Content-Length- or close-delimited, both of which the
     // bulk read handles.
-    http.useHTTP10(true);
+    //
+    // Except adsb.lol: it now sits behind an Envoy proxy, which refuses HTTP/1.0 outright
+    // (426 "Upgrade Required" on every request; Envoy's accept_http_10 is off by default),
+    // so that fallback was never answering. It replies with Content-Length rather than
+    // chunked, so HTTP/1.1 reads fine there. Should it ever start chunking, the 200 parses
+    // with no "ac" key and takes the same backoff as any unusable reply.
+    http.useHTTP10(kProviders[slot].http10);
     http.setConnectTimeout(6000);    // fail reasonably fast: a slow host must not block the
     http.setTimeout(8000);           // task (and the user's photo lookups) for too long
     if (!http.begin(client, url)) { Serial.printf("[adsb] begin failed (%s)\n", host); return false; }
@@ -179,8 +226,31 @@ bool AdsbClient::fetchFrom(int slot, std::vector<Aircraft>& out) {
             if (sp)
                 Serial.printf("[adsb] %s rate-limited; spacing requests %us apart\n",
                               host, (unsigned)(sp / 1000));
+        } else if (code <= 0) {
+            // No answer at all (connect refused, TLS, read timeout). Until this branch
+            // existed the pacer ignored such failures, so a silent provider was re-asked
+            // every poll at its full connect+TLS timeout price and the radar only updated
+            // as fast as the surviving providers answered.
+            // Log the gap that actually applies: while every provider is silent the pacer
+            // caps it at ADSB_SILENCE_OUTAGE_MAX_MS, below the stored one.
+            const uint32_t sp = _pacer.onTransportFail(slot);
+            if (sp) {
+                const uint32_t gap = _pacer.gapMs(slot, millis());
+                if (gap < sp)
+                    Serial.printf("[adsb] %s silent (HTTP %d); spacing requests %us apart "
+                                  "while every provider is silent, %us once one answers\n",
+                                  host, code, (unsigned)(gap / 1000), (unsigned)(sp / 1000));
+                else
+                    Serial.printf("[adsb] %s silent (HTTP %d); spacing requests %us apart\n",
+                                  host, code, (unsigned)(gap / 1000));
+            }
         }
-        http.end(); return false;
+        http.end();
+        if (code <= 0) {
+            const unsigned freed = freeStalledConnections();
+            if (freed) Serial.printf("[adsb] reset %u stalled connection%s\n", freed, freed == 1 ? "" : "s");
+        }
+        return false;
     }
     const int declaredLen = http.getSize();   // Content-Length, or -1 if chunked/unknown
     Serial.printf("[adsb] HTTP 200 (%s), content-length=%d\n", host, declaredLen);
@@ -250,7 +320,7 @@ bool AdsbClient::fetchFrom(int slot, std::vector<Aircraft>& out) {
         // every poll forever — exactly the loop the chunked-response bug produced.
         Serial.printf("[adsb] %s: 200 but no aircraft array (expected=%d read=%u)\n",
                       host, declaredLen, (unsigned)got);
-        const uint32_t sp = _pacer.onUnusable(slot);
+        const uint32_t sp = _pacer.onUnusable(slot, millis());
         if (sp)
             Serial.printf("[adsb] %s unusable; spacing requests %us apart\n",
                           host, (unsigned)(sp / 1000));
@@ -260,7 +330,7 @@ bool AdsbClient::fetchFrom(int slot, std::vector<Aircraft>& out) {
     // Only now is the response genuinely usable, so only now does it count as a success
     // for pacing purposes.
     _lastHost = host;                   // so the caller can say who served the data
-    if (_pacer.onOk(slot))
+    if (_pacer.onOk(slot, millis()))
         Serial.printf("[adsb] %s steady; spacing eased to %us\n",
                       host, (unsigned)(_pacer.spacingMs(slot) / 1000));
 
