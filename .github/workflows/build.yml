@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        env: [esp32-s3-amoled-175, esp32-s3-amoled-143, esp32-s3-lcd-21]
+        env: [esp32-s3-amoled-175, esp32-s3-amoled-143, esp32-s3-lcd-21, esp32-p4-lcd-7b]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -54,6 +54,14 @@ jobs:
         run: |
           set -euo pipefail
           b=".pio/build/$PIO_ENV"
+          mkdir -p firmware
+          # ESP32-P4 (untested on hardware): only the OTA image for now. A merged USB image needs
+          # the P4's own flash layout (bootloader offset, 32 MB flash), to be added once a real
+          # board has booted this firmware.
+          if [ "$PIO_ENV" = "esp32-p4-lcd-7b" ]; then
+            cp "$b/firmware.bin" "firmware/CapsuleRadar-ota-p4lcd7b.bin"
+            exit 0
+          fi
           case "$PIO_ENV" in
             esp32-s3-amoled-175) sfx="" ;;
             esp32-s3-amoled-143) sfx="-amoled143" ;;
