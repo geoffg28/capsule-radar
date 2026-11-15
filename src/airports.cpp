@@ -38,7 +38,8 @@ void airports_project(double homeLat, double homeLon, double rangeKm,
     }
 }
 
-void airports_draw(lv_draw_ctx_t *ctx, lv_color_t colorLarge, lv_color_t colorMedium, lv_opa_t opa) {
+void airports_draw(lv_draw_ctx_t *ctx, lv_color_t colorLarge, lv_color_t colorMedium, lv_opa_t opa,
+                   const lv_font_t *font) {
     if (s_apts.empty()) return;
 
     lv_draw_arc_dsc_t ring;
@@ -47,7 +48,11 @@ void airports_draw(lv_draw_ctx_t *ctx, lv_color_t colorLarge, lv_color_t colorMe
 
     lv_draw_label_dsc_t lbl;
     lv_draw_label_dsc_init(&lbl);
-    lbl.opa = opa; lbl.font = &lv_font_montserrat_12;
+    lbl.opa = opa; lbl.font = font;
+    // Label box sized from the font, so a larger one isn't clipped: vertically centred on
+    // the ring, wide enough for three capitals.
+    const lv_coord_t halfH = (lv_coord_t)((font->line_height + 1) / 2);
+    const lv_coord_t boxW  = (lv_coord_t)(font->line_height * 3);
 
     for (const Apt &ap : s_apts) {
         const lv_color_t c = ap.large ? colorLarge : colorMedium;
@@ -55,8 +60,8 @@ void airports_draw(lv_draw_ctx_t *ctx, lv_color_t colorLarge, lv_color_t colorMe
         lv_draw_arc(ctx, &ring, &ap.pos, 3, 0, 360);                        // small hollow ring
         if (ap.iata[0]) {
             lbl.color = c;
-            lv_area_t la = { (lv_coord_t)(ap.pos.x + 5), (lv_coord_t)(ap.pos.y - 7),
-                             (lv_coord_t)(ap.pos.x + 44), (lv_coord_t)(ap.pos.y + 7) };
+            lv_area_t la = { (lv_coord_t)(ap.pos.x + 5),        (lv_coord_t)(ap.pos.y - halfH),
+                             (lv_coord_t)(ap.pos.x + 5 + boxW), (lv_coord_t)(ap.pos.y + halfH) };
             lv_draw_label(ctx, &lbl, &la, ap.iata, NULL);
         }
     }

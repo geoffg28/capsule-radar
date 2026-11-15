@@ -10,7 +10,9 @@
 void airports_project(double homeLat, double homeLon, double rangeKm,
                       float cx, float cy, float rOuterPx);
 
-void airports_draw(lv_draw_ctx_t *ctx, lv_color_t colorLarge, lv_color_t colorMedium, lv_opa_t opa);
+// font: the IATA code label font (the radar passes a bigger one in large-text mode).
+void airports_draw(lv_draw_ctx_t *ctx, lv_color_t colorLarge, lv_color_t colorMedium, lv_opa_t opa,
+                   const lv_font_t *font);
 
 // Find the nearest recognizable airport (one with an IATA code). Used by the
 // weather view for aviation context; entirely offline from the embedded data.

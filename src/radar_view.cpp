@@ -276,6 +276,8 @@ static void flow_redraw_all(void) {
 static void grid_draw_cb(lv_event_t *e) {
     lv_draw_ctx_t *d = lv_event_get_draw_ctx(e);
     const lv_point_t c = { s_cx, s_cy };
+    // airport IATA codes: same 12 -> 16 bump as the altitude labels in large-text mode
+    const lv_font_t *apFont = s_bigText ? &lv_font_montserrat_16 : &lv_font_montserrat_12;
 
     if (orb()) {
         lv_draw_line_dsc_t gl;
@@ -304,7 +306,7 @@ static void grid_draw_cb(lv_event_t *e) {
         td.border_width = 1;
         td.border_opa = dim(160);
         coastline_draw(d, COAST_COLOR, dim(170), 2);    // landmass outline under the triangle
-        if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, AIRPORT_COLOR_MED, dim(150));
+        if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, AIRPORT_COLOR_MED, dim(150), apFont);
         lv_draw_polygon(d, &td, tri, 3);
         return;
     }
@@ -312,7 +314,7 @@ static void grid_draw_cb(lv_event_t *e) {
     // coastline first, so the rings/crosshair sit cleanly on top of it.
     // Steel blue + 2 px so it reads as a map outline, distinct from the green altitude trails.
     coastline_draw(d, COAST_COLOR, dim(165), 2);
-    if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, AIRPORT_COLOR_MED, dim(150));
+    if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, AIRPORT_COLOR_MED, dim(150), apFont);
 
     // phosphor: concentric rings + crosshair — 5 evenly spaced rings from center to the
     // outer edge, so each ring is always range/5 regardless of the selected zoom level.
