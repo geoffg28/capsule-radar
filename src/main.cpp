@@ -1203,9 +1203,11 @@ void setup() {
     delay(200);
     Serial.println("\nCapsule Radar boot  fw " FW_VERSION "  board " BOARD_NAME);
 
+#ifdef PIN_LCD_SCLK   // a MIPI-DSI panel (the P4 7B) has no clock GPIO; config.h checks the rest at compile time
     if (PIN_LCD_SCLK < 0 || PIN_I2C_SDA < 0) {
         Serial.println("[!] Pins in config.h are still -1. Copy them from the Waveshare demo.");
     }
+#endif
     Serial.printf("PSRAM: %u bytes free\n", (unsigned)ESP.getFreePsram());
     mbedtls_platform_set_calloc_free(tls_calloc, tls_free);   // before any TLS use
 

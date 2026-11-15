@@ -6,7 +6,8 @@
 // controller's reset is tied to the panel reset and it is absent from I2C until then.
 // The actual UI is built by ui_boot_create() (shared with the native SDL sim).
 #include "config.h"
-#if !defined(BOARD_LCD21)      // CO5300 AMOLED driver (1.75 + 1.43); the LCD-2.1 build uses display_st7701.cpp
+// CO5300 AMOLED driver (1.75 + 1.43). The LCD 2.1 uses display_st7701.cpp, the P4 7B display_dsi_ek79007.cpp.
+#if !defined(BOARD_LCD21) && !defined(BOARD_P4_LCD7B)
 #include "display.h"
 #include "radar_view.h"
 #include "ui.h"
@@ -915,4 +916,4 @@ uint32_t inactiveMs() { return lv_disp_get_inactive_time(NULL); }
 
 } // namespace display
 
-#endif  // !BOARD_LCD21
+#endif  // !BOARD_LCD21 && !BOARD_P4_LCD7B

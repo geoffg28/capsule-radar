@@ -137,7 +137,11 @@ static bool clock_time_now(ClockHands &out) {
     if (tv.tv_sec <= 1700000000L) return false;
     const time_t t = tv.tv_sec;
     struct tm lt;
+#if defined(_WIN32)   // desktop simulator on Windows: the CRT has localtime_s instead
+    localtime_s(&lt, &t);
+#else
     localtime_r(&t, &lt);
+#endif
     out = clock_hands(lt.tm_hour, lt.tm_min, lt.tm_sec, (int)(tv.tv_usec / 1000));
     return true;
 }

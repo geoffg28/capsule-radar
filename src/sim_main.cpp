@@ -27,8 +27,8 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#define SIM_W SCREEN_W   // 466
-#define SIM_H SCREEN_H   // 466
+#define SIM_W PANEL_W    // 466 (round boards) / 1024 (P4 7B: radar pane + docked list)
+#define SIM_H PANEL_H    // 466 / 600
 
 static SDL_Window   *s_win = NULL;
 static SDL_Renderer *s_ren = NULL;

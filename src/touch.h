@@ -4,6 +4,7 @@
 //   TOUCH_DRIVER_CST9217 -> touch_cst9217.cpp  (1.75)
 //   TOUCH_DRIVER_CST820  -> touch_cst820.cpp   (LCD 2.1)
 //   TOUCH_DRIVER_FT3168  -> touch_ft3168.cpp   (1.43)
+//   TOUCH_DRIVER_GT911   -> touch_gt911.cpp    (P4 7B)
 #include <stdint.h>
 
 // TOUCH_NODATA: the read failed (I2C error, or a frame the controller marked invalid), so
