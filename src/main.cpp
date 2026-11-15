@@ -1,13 +1,14 @@
-// Capsule Radar — entry point / glue. SKELETON: TODOs mark what to implement.
-// Order of work is in CLAUDE.md (milestones). Bring up the Waveshare demo first.
+// Capsule Radar — entry point / glue.
 #include <Arduino.h>
 #include <WiFi.h>
 #include <vector>
 #include "config.h"
+#include "web_input.h"              // strict parsing of numbers from the config page
 #include "aircraft.h"
 #include "geo.h"
 #include "adsb_client.h"
 #include "snapshot_gate.h"
+#include "feed_watchdog.h"
 #include "photo.h"
 #include "photo_client.h"
 #include "weather.h"
@@ -19,7 +20,8 @@
 #include "radar_view.h"
 #include "ui.h"
 #include "display.h"                  // M0: CO5300 + LVGL bring-up
-#include "imu_qmi8658.h"             // face-down sleep
+#include "imu_qmi8658.h"             // face-down sleep: accelerometer reads
+#include "facedown_sleep.h"          // face-down sleep: the decision
 #include "gps.h"                     // LC76G GNSS (-G variant only)
 #include "battery.h"                 // AXP2101 battery gauge
 #include "rtc_pcf85063.h"            // PCF85063 RTC (offline clock + date)
@@ -29,6 +31,7 @@
 #include <WiFiManager.h>             // captive portal
 #include <Preferences.h>            // NVS (persist theme/settings)
 #include <time.h>                   // NTP/RTC clock + date
+#include <esp_sntp.h>               // SNTP sync callback: a REAL NTP fix (not just a plausible epoch)
 #include <WebServer.h>              // configuration web page
 #include <ESPmDNS.h>                // http://capsuleradar.local
 #include <ArduinoOTA.h>             // OTA firmware update over WiFi (PlatformIO/espota)
@@ -63,8 +66,10 @@ static int                   g_alertMode = 2;                        // 0=off 1=
 static float                 g_proximityKm = 0.0f;                   // proximity alert radius, km (0=off) (web/NVS)
 static uint32_t              g_idleDimMs = IDLE_DIM_MS;              // dim after this idle time (0 = never)
 static bool                  g_fdSleep = true;                       // face-down sleep (screen off) on/off (web/NVS)
+static bool                  g_clockOn = true;                       // idle clock instead of the idle dim (web/NVS)
 static bool                  g_showSweep = true;                     // rotating sweep line on/off (web/NVS)
 static int                   g_units = 0;                            // 0=Aviation 1=Metric 2=Imperial (web/NVS)
+static int                   g_tempUnit = 0;                         // weather temp: 0=follow Units 1=°C 2=°F (web/NVS)
 static bool                  g_showAirports = true;                  // airport markers on/off (web/NVS)
 static bool                  g_hideGround   = false;                 // skip on-ground aircraft in the feed (web/NVS)
 static int                   g_minAltFt     = 0;                     // only show aircraft above this altitude, ft (0 = off) (web/NVS)
@@ -78,13 +83,17 @@ static int                   g_trailLen = 2;                         // aircraft
 static int                   g_maxAc = 20;                           // max aircraft drawn on the scope (web/NVS)
 static bool                  g_bigText = false;                      // accessibility: large fonts (web/NVS, applied at boot)
 static volatile bool         g_onBattery = false;                    // discharging (set on core 1, read on core 0)
-static bool                  g_rtcSynced = false;                    // RTC written from NTP this session?
+static volatile bool         g_rtcSyncPending = false;               // SNTP synced: RTC should be rewritten on core 1
 static std::vector<Aircraft> g_snap;                                 // last snapshot (instant re-render on zoom)
 static volatile bool         g_requery = false;                      // range changed -> adsb_task re-begins
 static float                 g_requeryKm = 0.0f;
 static volatile bool         g_feedOk = true;                        // ADS-B feed healthy? (HUD warning)
 static volatile uint32_t     g_lastFeedOkMs = 0;                     // millis() of the last good poll (HUD staleness)
+static volatile uint32_t     g_powerOffAtMs = 0;                     // !=0: AXP2101 power-off when millis() reaches it
 static volatile uint32_t     g_rebootAtMs = 0;                       // !=0: reboot when millis() reaches it (clean start after WiFi config)
+static bool                  g_pmicOk = false;                       // AXP2101 answered (powers the power-off paths)
+static bool                  g_updateBlocked = false;                // /update: refused at START (cross-site), 403 sent on completion
+static bool                  g_updateDone = false;                   // /update: Update.end() succeeded -> the completion handler may reboot
 static String                g_tz = TZ_STR;                          // POSIX timezone (web-configurable, NVS); applied via configTzTime
 static volatile bool         g_weatherDirty = false;
 static volatile bool         g_wxRadarDirty = false;
@@ -100,6 +109,7 @@ static const struct { const char *label; const char *tz; int offMin; int dst; } 
     {"London / Lisbon",          "GMT0BST,M3.5.0/1,M10.5.0",          0, 1},
     {"Madrid / Paris / Berlin",  "CET-1CEST,M3.5.0,M10.5.0/3",       60, 1},
     {"Athens / Helsinki",        "EET-2EEST,M3.5.0/3,M10.5.0/4",     120, 1},
+    {"Istanbul / Moscow",        "<+03>-3",                          180, 0},
     {"New York (US Eastern)",    "EST5EDT,M3.2.0,M11.1.0",          -300, 1},
     {"Chicago (US Central)",     "CST6CDT,M3.2.0,M11.1.0",          -360, 1},
     {"Denver (US Mountain)",     "MST7MDT,M3.2.0,M11.1.0",          -420, 1},
@@ -126,14 +136,16 @@ static void adsb_task(void*) {
     uint32_t nextWeatherAt = UINT32_MAX;       // armed five seconds after WiFi connects
     uint32_t nextWxRadarAt = UINT32_MAX;
     uint32_t nextCloudImageAt = UINT32_MAX;
-    uint32_t lastFeedOk = millis();          // self-heal: time of last good (or no-WiFi) poll
+    FeedWatchdog watchdog(millis());         // self-heal: see feed_watchdog.h
     for (;;) {
         const bool conn = (WiFi.status() == WL_CONNECTED);
         if (conn && !wasConnected) {
             // disable WiFi modem power-save: on a mains-powered desk gadget it just adds latency
             // and makes RSSI bounce (feed goes stale -> amber bars) even sitting next to the router.
             WiFi.setSleep(false);
-            Serial.printf("[adsb] WiFi up, IP %s\n", WiFi.localIP().toString().c_str());
+            Serial.printf("[adsb] WiFi up, IP %s (AP %s, ch %d, %d dBm)\n",
+                          WiFi.localIP().toString().c_str(), WiFi.BSSIDstr().c_str(),
+                          (int)WiFi.channel(), (int)WiFi.RSSI());
             configTzTime(g_tz.c_str(), "pool.ntp.org", "time.nist.gov");  // local time (web-configurable TZ)
             Serial.println("[web] config: http://capsuleradar.local/  (or the IP above)");
             nextWeatherAt = millis() + 5000UL; // let the first ADS-B poll complete before weather TLS
@@ -142,19 +154,30 @@ static void adsb_task(void*) {
             // mDNS + OTA are started on core 1 (loop) to keep all mDNS use on one core
         }
         wasConnected = conn;
-        // self-heal: a long feed outage while WiFi is up usually means the internal heap
-        // fragmented and the TLS handshake can't allocate -> reboot to recover (settings persist).
-        // A provider that answers "403, not for you" is NOT that failure, and neither is a poll
-        // we deliberately paced: the stack is fine either way. Count any completed HTTP exchange
-        // as alive, or a feed that every provider refuses reboots the device every three
-        // minutes — and every boot asks all three of them again.
-        const uint32_t lastHttpMs = g_adsb.lastResponseMs();
-        if (lastHttpMs && (int32_t)(lastHttpMs - lastFeedOk) > 0) lastFeedOk = lastHttpMs;
-        if (!conn) lastFeedOk = millis();
-        else if (millis() - lastFeedOk > 180000UL) {
-            Serial.println("[adsb] feed stuck >180s with WiFi up -> restarting to recover");
-            delay(100);
-            ESP.restart();
+        // Self-heal: reboot at once for a fragmented internal heap starving TLS, and as a
+        // last resort after ADSB_STUCK_HARD_MS whatever the heap says. Not for refusals or
+        // a short internet outage behind working WiFi (see feed_watchdog.h).
+        if (const uint32_t answeredMs = g_adsb.lastResponseMs()) watchdog.onAnswer(answeredMs);
+        switch (watchdog.check(conn, millis(), g_adsb.allParked(), [] {
+                    return (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL); })) {
+            case FeedWatchdog::RESTART:
+                Serial.printf("[adsb] feed stuck >%us and internal heap fragmented -> restarting to recover\n",
+                              (unsigned)(ADSB_STUCK_MS / 1000));
+                delay(100);
+                ESP.restart();
+                break;
+            case FeedWatchdog::RESTART_LONG:
+                Serial.printf("[adsb] feed stuck >%u min with WiFi up -> restarting as a last resort\n",
+                              (unsigned)(ADSB_STUCK_HARD_MS / 60000UL));
+                delay(100);
+                ESP.restart();
+                break;
+            case FeedWatchdog::LOG_STUCK:
+                Serial.printf("[adsb] feed stuck >%us with WiFi up (no internet?); heap OK, staying up\n",
+                              (unsigned)(ADSB_STUCK_MS / 1000));
+                break;
+            case FeedWatchdog::NONE:
+                break;
         }
         if (g_requery) {                          // display range changed (double-tap zoom)
             g_adsb.begin(g_settings.homeLat, g_settings.homeLon, g_requeryKm);
@@ -180,7 +203,7 @@ static void adsb_task(void*) {
                     backoffMs = 0;                   // recovered: back to the normal cadence
                     g_feedOk = true;
                     const uint32_t receivedMs = millis();
-                    lastFeedOk = receivedMs;
+                    watchdog.onPoll(FeedWatchdog::FETCHED, receivedMs);
                     g_lastFeedOkMs = receivedMs;      // HUD: mark data as fresh
 
                     const bool publish = snapshotGate.shouldPublish(
@@ -202,14 +225,17 @@ static void adsb_task(void*) {
                         }
                     }
                 } else if (g_adsb.lastPollSkipped()) {
-                    // Every provider is parked or inside its spacing window: we chose not to
-                    // ask. Logging this each tick would bury the real errors, and counting it
-                    // would show an outage warning for our own politeness. Prolonged silence
-                    // still trips the warning, via the time check rather than a fail count.
+                    // Every provider is parked or inside its spacing/silence window: we chose
+                    // not to ask. Logging this each tick would bury the real errors, and
+                    // counting it would show an outage warning for our own politeness.
+                    // Prolonged silence still trips the warning, via the time check rather
+                    // than a fail count. Not proof of life for the watchdog: nothing was sent.
+                    watchdog.onPoll(FeedWatchdog::SKIPPED, nowMs);
                     if ((int32_t)(nowMs - g_adsb.lastOkMs()) > (int32_t)ADSB_FEED_STALE_MS)
                         g_feedOk = false;
                 } else {
                     Serial.println("[adsb] poll failed");
+                    watchdog.onPoll(FeedWatchdog::FAILED, nowMs);
                     if (++failCount >= 5) g_feedOk = false;   // sustained outage -> HUD warning
                     // Both hosts get hit every cycle once one is struggling (see poll()), so a
                     // sustained outage can hammer the fallback into its own rate limit. Back off
@@ -272,7 +298,9 @@ static void loadSettings() {
     p.begin("capsuleradar", true);
     g_settings.homeLat = p.getDouble("homeLat", HOME_LAT_DEFAULT);
     g_settings.homeLon = p.getDouble("homeLon", HOME_LON_DEFAULT);
-    g_settings.rangeKm = p.getFloat("rangeKm", RANGE_KM_DEFAULT);
+    // Repair a value that can't work: an old install may hold the 250 km the web page once
+    // offered (clamped to 150) or even 0 (divides by zero in geo::projectToScreen).
+    g_settings.rangeKm = repairRangeKm(p.getFloat("rangeKm", RANGE_KM_DEFAULT));
     // floor of 5: a stored 0 would boot with the panel dark forever, looking like a dead board
     g_brightnessDay    = constrain(p.getInt("bright", BRIGHTNESS_DEFAULT), 5, 255);
     g_volume           = p.getInt("vol", 60);
@@ -284,7 +312,9 @@ static void loadSettings() {
     g_maxAc            = p.getInt("maxac", 20);
     g_idleDimMs        = p.getUInt("idledim", IDLE_DIM_MS);
     g_fdSleep          = p.getBool("fdsleep", true);
+    g_clockOn          = p.getBool("clock", true);
     g_units            = p.getInt("units", 0);
+    g_tempUnit         = p.getInt("tempu", 0);
     g_tz               = p.getString("tz", TZ_STR);
     g_bigText          = p.getBool("bigtext", false);
     p.end();
@@ -354,7 +384,7 @@ static void onRangeChange(float km) {
     ui_on_data_updated();
 }
 
-// Persist the visual theme in NVS (called when the user long-presses to switch).
+// Persist the visual theme in NVS (called when the user holds the radar to switch it).
 static void saveTheme(int t) {
     Preferences p;
     p.begin("capsuleradar", false);
@@ -366,7 +396,7 @@ static void saveTheme(int t) {
 static time_t utc_to_time(struct tm *utc) {
     setenv("TZ", "UTC0", 1); tzset();
     const time_t t = mktime(utc);
-    setenv("TZ", TZ_STR, 1); tzset();   // restore local TZ for getLocalTime()
+    setenv("TZ", g_tz.c_str(), 1); tzset();   // restore the SAVED zone, not the Spain default
     return t;
 }
 
@@ -380,32 +410,122 @@ static void rtc_seed_clock() {
     Serial.println("[rtc] system clock seeded from RTC");
 }
 
-// Brightness combines idle auto-dim and face-down sleep (sleep wins -> screen off).
-static bool g_asleep = false;   // face-down
-static bool g_idle   = false;   // no touch for a while
+// Brightness: face-down sleep wins (screen off), then the idle clock, then the idle dim.
+// The clock ramps the panel from the day brightness to clockB along with its animation,
+// so the loop calls this on every pass; the panel is written only when the value changes.
+static bool g_asleep    = false;   // face-down
+static bool g_idle      = false;   // no touch for a while
+static bool g_clockHold = false;   // idle with the clock on, but an emergency in range keeps the radar up
 static void applyBrightness() {
-    int b = g_brightnessDay;
-    if (g_idle  && BRIGHTNESS_IDLE  < b) b = BRIGHTNESS_IDLE;   // idle only dims down
+    const int day = g_brightnessDay;
+    int b = day;
+    // p is 0 on the pass that starts the clock (and a full LVGL repaint follows it), so test
+    // clockRequested() too: falling through to the idle dim there would blink the panel.
+    const float p = radar::clockProgress();
+    if (radar::clockRequested() || p > 0) {
+        const int clockB = max(day * CLOCK_BRIGHTNESS_PCT / 100, min(day, BRIGHTNESS_IDLE));
+        b = day + (int)lroundf((float)(clockB - day) * p);
+    } else if (g_idle && !g_clockHold) {
+        b = min(day, BRIGHTNESS_IDLE);                           // idle only dims down
+    }
     if (g_asleep) b = 0;                                         // face-down -> screen off
-    display::setBrightness(b);
+    static int shown = -1;
+    if (b != shown) { shown = b; display::setBrightness((uint8_t)b); }
 }
 
 // ----------------------------- configuration web --------------------------------
 static WebServer g_web(80);
 
+// ---- cross-site request guard (CSRF) ----
+// A hostile web page can make the VICTIM's browser send requests to this device, which
+// sits on the same LAN. It cannot read any answer (we send no CORS headers), so refusing
+// the request defeats it. Two layers:
+//  - requestCrossSite() refuses what the browser itself marks as cross-site. Over plain
+//    http:// browsers send NO Sec-Fetch-Site (Fetch Metadata only goes to HTTPS and
+//    localhost), but every cross-site POST carries Origin. That guards the POSTs (/save,
+//    /wifi, /poweroff, /update): plain HTML forms send those, so they cannot carry a
+//    custom header. Same-origin requests and header-less clients (curl, the IDE's
+//    uploader) pass.
+//  - refuseUnlessPageFetch() guards the live-setting GETs (/bright, /vol, ...) as well. A
+//    cross-site <img src="http://capsuleradar.local/bright?v=5"> sends neither
+//    Sec-Fetch-Site nor Origin, so these also demand the WEB_PAGE_HDR header. Only a script
+//    can add a custom header, and a cross-origin fetch() with one needs a CORS preflight
+//    this server never approves; <img>, links and forms cannot send it at all. The config
+//    page's own fetch() calls (G() in its script) send it; curl needs -H 'X-Radar: 1'.
+#define WEB_PAGE_HDR "X-Radar"
+static bool requestCrossSite() {
+    const String sfs = g_web.header("Sec-Fetch-Site");
+    if (sfs.length() && sfs != "same-origin" && sfs != "none") return true;
+    const String origin = g_web.header("Origin");
+    if (origin.length()) {
+        // "http://192.168.4.1" / "https://capsuleradar.local": compare the authority
+        // with the Host header, ignoring default ports on either side.
+        const int scheme = origin.indexOf("://");
+        String auth = (scheme < 0) ? origin : origin.substring(scheme + 3);
+        const int slash = auth.indexOf('/');
+        if (slash >= 0) auth = auth.substring(0, slash);
+        String host = g_web.hostHeader();
+        if (auth.endsWith(":80"))  auth = auth.substring(0, auth.length() - 3);
+        if (auth.endsWith(":443")) auth = auth.substring(0, auth.length() - 4);
+        if (host.endsWith(":80"))  host = host.substring(0, host.length() - 3);
+        if (host.endsWith(":443")) host = host.substring(0, host.length() - 4);
+        if (!auth.equalsIgnoreCase(host)) return true;
+    }
+    return false;
+}
+
+// First line of every state-changing POST handler: rejects (and answers 403) or passes.
+static bool refuseIfCrossSite() {
+    if (!requestCrossSite()) return false;
+    g_web.send(403, "text/plain", "cross-site request rejected");
+    return true;
+}
+
+// First line of every live-setting GET handler (see the guard notes above).
+static bool refuseUnlessPageFetch() {
+    if (g_web.header(WEB_PAGE_HDR) != "1") {
+        g_web.send(403, "text/plain", "missing " WEB_PAGE_HDR " header");
+        return true;
+    }
+    return refuseIfCrossSite();
+}
+
+// A buzzer has no level (BOARD_HAS_BUZZER ignores the volume), so its page has no slider.
+#if BOARD_HAS_BUZZER
+#define VOL_HIDE " hidden"
+#else
+#define VOL_HIDE ""
+#endif
+// With neither a codec nor a buzzer (the 1.43), every Sound control is a silent no-op: no card.
+#if BOARD_HAS_AUDIO || BOARD_HAS_BUZZER
+#define SOUND_HIDE ""
+#else
+#define SOUND_HIDE " hidden"
+#endif
+
 static void handleRoot() {
     const int th = radar::theme();
-    // The value submitted stays in km (the device works in km); only the label is shown in
-    // the user's chosen distance unit so the config page matches the screen. Same NM-clean
-    // steps as the on-device zoom button (config.h RANGE_STEPS_KM), so both stay in sync.
+    // The page's own list (WEB_RANGE_KM, config.h) is the same NM steps as the on-device zoom
+    // button, so both stay in sync. The value submitted stays in km (the device works in km);
+    // only the label is shown in the user's chosen distance unit so the config page matches
+    // the screen. A stored range that isn't in the list gets its own entry with its exact
+    // value, so saving the form with the other fields leaves the range alone.
     const float    ufac  = (g_units == 0) ? 0.539957f : (g_units == 2 ? 0.621371f : 1.0f);
     const char    *uname = (g_units == 0) ? "nm" : (g_units == 2 ? "mi" : "km");
     String ropts;
-    for (float r : RANGE_STEPS_KM) {
+    bool   rlisted = false;
+    for (float rkm : WEB_RANGE_KM) {
+        const bool sel = fabsf(rkm - g_settings.rangeKm) < 0.05f;
+        if (sel) rlisted = true;
         char o[72];
-        float diff = r - g_settings.rangeKm; if (diff < 0) diff = -diff;
         snprintf(o, sizeof(o), "<option value=%.2f%s>%.0f %s</option>",
-                 (double)r, (diff < 0.5f) ? " selected" : "", (double)(r * ufac), uname);
+                 (double)rkm, sel ? " selected" : "", (double)(rkm * ufac), uname);
+        ropts += o;
+    }
+    if (!rlisted) {
+        char o[80];
+        snprintf(o, sizeof(o), "<option value=%.2f selected>%.0f %s</option>",
+                 g_settings.rangeKm, g_settings.rangeKm * ufac, uname);
         ropts += o;
     }
     const char *tnames[] = {"Phosphor", "Orb", "Amber CRT", "Military"};
@@ -428,12 +548,19 @@ static void handleRoot() {
         iopts += o;
     }
     { char o[64]; snprintf(o, sizeof(o), "<option value=0%s>Never</option>", curIdle == 0 ? " selected" : ""); iopts += o; }
-    const char *unames[] = {"Aviation (ft, kt, nm)", "Metric (m, km/h, km)", "Imperial (ft, mph, mi)"};
+    const char *unames[] = {"Aviation (ft, kt, nm, \xC2\xB0" "C)", "Metric (m, km/h, km, \xC2\xB0" "C)", "Imperial (ft, mph, mi, \xC2\xB0" "F)"};
     String uopts;
     for (int i = 0; i < 3; ++i) {
         char o[96];
         snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_units ? " selected" : "", unames[i]);
         uopts += o;
+    }
+    const char *tunames[] = {"Same as Units", "\xC2\xB0" "C", "\xC2\xB0" "F"};
+    String tuopts;
+    for (int i = 0; i < 3; ++i) {
+        char o[64];
+        snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_tempUnit ? " selected" : "", tunames[i]);
+        tuopts += o;
     }
     const char *tlnames[] = {"Off", "Short", "Medium", "Long"};
     String tlopts;
@@ -501,9 +628,10 @@ static void handleRoot() {
     if (gps_present()) {
         gpsRow  = "<label><input type=checkbox class=ck ";
         gpsRow += g_useGps ? "checked" : "";
-        gpsRow += " onchange='gp(this.checked)'>Use GPS for location</label>";
+        gpsRow += " onchange='gp(this.checked)'>Use GPS for location *</label>";
         gpsRow += "<div style='font-size:12px;opacity:.6;margin:-2px 0 6px'>"
-                  "When on, the location above is used until the GPS gets a fix, then it takes over.</div>";
+                  "When on, the location above is used until the GPS gets a fix, then it takes over.<br>"
+                  "* Applies immediately; Save &amp; restart not needed.</div>";
     }
     // 16 KB: the page outgrew 10 KB (~10.3 KB with the GPS row), and snprintf silently cut
     // off the closing </script>, so none of the live-setting handlers existed in the browser.
@@ -554,7 +682,8 @@ static void handleRoot() {
         "<div class=card><div class=t>Display</div>"
         "<label>Brightness</label>"
         "<input type=range min=5 max=255 value='%d' oninput='b(this.value,0)' onchange='b(this.value,1)'>"
-        "<label>Dim screen after</label><select onchange='d(this.value)'>%s</select>"
+        "<label>Clock or dim after</label><select onchange='d(this.value)'>%s</select>"
+        "<label><input type=checkbox class=ck %s onchange='cl(this.checked)'>Show a clock instead of dimming</label>"
         "<label><input type=checkbox class=ck %s onchange='fd(this.checked)'>Screen off when placed face-down</label>"
         "<label><input type=checkbox class=ck %s onchange='sw(this.checked)'>Show radar sweep</label>"
         "<label><input type=checkbox class=ck %s onchange='ap(this.checked)'>Show airports</label>"
@@ -567,10 +696,11 @@ static void handleRoot() {
         "<label><input type=checkbox class=ck %s onchange='bt(this.checked)'>Large text (restarts the device)</label>"
         "<label>Screen rotation (degrees clockwise)</label>"
         "<input type=number min=0 max=359 step=1 value='%d' onchange='ro(this.value)'>"
-        "<label>Units</label><select onchange='u(this.value)'>%s</select></div>"
-        "<div class=card><div class=t>Sound</div>"
-        "<label>Volume</label>"
-        "<input type=range min=0 max=100 value='%d' oninput='v(this.value,0)' onchange='v(this.value,1)'>"
+        "<label>Units</label><select onchange='u(this.value)'>%s</select>"
+        "<label>Weather temperature</label><select onchange='tu(this.value)'>%s</select></div>"
+        "<div class=card" SOUND_HIDE "><div class=t>Sound</div>"
+        "<div" VOL_HIDE "><label>Volume</label>"
+        "<input type=range min=0 max=100 value='%d' oninput='v(this.value,0)' onchange='v(this.value,1)'></div>"
         "<label><input type=checkbox class=ck %s onchange='m(this.checked)'>Mute alerts</label>"
         "<label>Alert on</label><select onchange='al(this.value)'>%s</select>"
         "<label>Proximity alert</label><select onchange='px(this.value)'>%s</select>"
@@ -587,26 +717,29 @@ static void handleRoot() {
         "MK.on('dragend',function(){S(MK.getLatLng());});"
         "MAP.on('click',function(e){MK.setLatLng(e.latlng);S(e.latlng);});"
         "setTimeout(function(){MAP.invalidateSize();},300);"
-        "function b(v,s){fetch('/bright?v='+v+(s?'&save=1':''))}"
-        "function v(x,s){fetch('/vol?v='+x+(s?'&save=1':''))}"
-        "function m(c){fetch('/vol?mute='+(c?1:0)+'&save=1')}"
-        "function t(){fetch('/vol?test=1')}"
-        "function d(v){fetch('/idle?v='+v+'&save=1')}"
-        "function fd(c){fetch('/fdsleep?v='+(c?1:0)+'&save=1')}"
-        "function sw(c){fetch('/sweep?v='+(c?1:0)+'&save=1')}"
-        "function ap(c){fetch('/airports?v='+(c?1:0)+'&save=1')}"
-        "function hg(c){fetch('/ground?v='+(c?1:0)+'&save=1')}"
-        "function ma(v){fetch('/altmin?v='+v+'&save=1')}"
-        "function mb(v){fetch('/altmax?v='+v+'&save=1')}"
-        "function mo(c){fetch('/milonly?v='+(c?1:0)+'&save=1')}"
-        "function tl(v){fetch('/trail?v='+v+'&save=1')}"
-        "function mx(v){fetch('/maxac?v='+v+'&save=1')}"
-        "function bt(c){fetch('/bigtext?v='+(c?1:0)+'&save=1')}"
-        "function ro(v){fetch('/rotate?v='+v+'&save=1')}"
-        "function u(v){fetch('/units?v='+v+'&save=1')}"
-        "function al(v){fetch('/alerts?mode='+v+'&save=1')}"
-        "function px(v){fetch('/alerts?prox='+v+'&save=1')}"
-        "function gp(c){fetch('/gps?v='+(c?1:0)+'&save=1')}"
+        "function G(p){fetch(p,{headers:{'" WEB_PAGE_HDR "':'1'}})}"
+        "function b(v,s){G('/bright?v='+v+(s?'&save=1':''))}"
+        "function v(x,s){G('/vol?v='+x+(s?'&save=1':''))}"
+        "function m(c){G('/vol?mute='+(c?1:0)+'&save=1')}"
+        "function t(){G('/vol?test=1')}"
+        "function d(v){G('/idle?v='+v+'&save=1')}"
+        "function fd(c){G('/fdsleep?v='+(c?1:0)+'&save=1')}"
+        "function sw(c){G('/sweep?v='+(c?1:0)+'&save=1')}"
+        "function ap(c){G('/airports?v='+(c?1:0)+'&save=1')}"
+        "function hg(c){G('/ground?v='+(c?1:0)+'&save=1')}"
+        "function ma(v){G('/altmin?v='+v+'&save=1')}"
+        "function mb(v){G('/altmax?v='+v+'&save=1')}"
+        "function mo(c){G('/milonly?v='+(c?1:0)+'&save=1')}"
+        "function tl(v){G('/trail?v='+v+'&save=1')}"
+        "function mx(v){G('/maxac?v='+v+'&save=1')}"
+        "function bt(c){G('/bigtext?v='+(c?1:0)+'&save=1')}"
+        "function ro(v){G('/rotate?v='+v+'&save=1')}"
+        "function u(v){G('/units?v='+v+'&save=1')}"
+        "function tu(v){G('/tempu?v='+v+'&save=1')}"
+        "function al(v){G('/alerts?mode='+v+'&save=1')}"
+        "function px(v){G('/alerts?prox='+v+'&save=1')}"
+        "function gp(c){G('/gps?v='+(c?1:0)+'&save=1')}"
+        "function cl(c){G('/clock?v='+(c?1:0)+'&save=1')}"
         // auto-pick the visitor's time zone from their browser clock (only if they haven't set one)
         "var TZSET=%d;(function(){if(TZSET)return;"
         "var d=new Date(),j=new Date(d.getFullYear(),0,1).getTimezoneOffset(),"
@@ -617,9 +750,9 @@ static void handleRoot() {
         "if(b>=0)e.selectedIndex=b;})();</script></body></html>",
         g_settings.homeLat, g_settings.homeLon, gpsRow.c_str(), ropts.c_str(), topts.c_str(),
         tzopts.c_str(),
-        g_brightnessDay, iopts.c_str(), g_fdSleep ? "checked" : "", g_showSweep ? "checked" : "",
+        g_brightnessDay, iopts.c_str(), g_clockOn ? "checked" : "", g_fdSleep ? "checked" : "", g_showSweep ? "checked" : "",
         g_showAirports ? "checked" : "", g_hideGround ? "checked" : "", maopts.c_str(), mbopts.c_str(), g_milOnly ? "checked" : "",
-        tlopts.c_str(), mxopts.c_str(), g_bigText ? "checked" : "", g_rotation, uopts.c_str(),
+        tlopts.c_str(), mxopts.c_str(), g_bigText ? "checked" : "", g_rotation, uopts.c_str(), tuopts.c_str(),
         g_volume, g_muted ? "checked" : "", aopts.c_str(), popts.c_str(),
         g_settings.homeLat, g_settings.homeLon, (g_tz == TZ_STR ? 0 : 1));
     if (len >= (int)BUFSZ)   // truncated page = broken <script>; make it loud, not silent
@@ -627,24 +760,43 @@ static void handleRoot() {
     g_web.send(200, "text/html", buf);
 }
 
+// Nothing saved and no restart when an input is invalid: the browser shows this short
+// error page instead of the device rebooting centred on (0,0).
+static void sendSaveError(const char *field) {
+    String body = "<body style='background:#06100a;color:#ffb23c;font-family:sans-serif;padding:24px'>"
+                  "Not saved: <b>";
+    body += field;
+    body += "</b> must be a number like 38.8409 (dot or comma). "
+            "<a href='/' style='color:#1dff86'>Back to settings</a></body>";
+    g_web.send(400, "text/html", body);
+}
+
 static void handleSave() {
-    Preferences p;
-    p.begin("capsuleradar", false);
-    // Reject out-of-range coordinates so a typo can't leave the radar unusable.
+    if (refuseIfCrossSite()) return;
+    // Validate EVERYTHING first, write only if all fields pass. String::toDouble() used
+    // to accept "" (0) and "38,84" (38) — both inside the valid range, both saved.
+    double lat = 0.0, lon = 0.0, range = 0.0;
     if (g_web.hasArg("lat")) {
-        const double lat = g_web.arg("lat").toDouble();
-        if (lat >= -90.0 && lat <= 90.0) p.putDouble("homeLat", lat);
+        if (!parseDoubleStrict(g_web.arg("lat").c_str(), &lat)) return sendSaveError("latitude");
+        if (lat < -90.0 || lat > 90.0)          return sendSaveError("latitude (must be -90..90)");
     }
     if (g_web.hasArg("lon")) {
-        const double lon = g_web.arg("lon").toDouble();
-        if (lon >= -180.0 && lon <= 180.0) p.putDouble("homeLon", lon);
+        if (!parseDoubleStrict(g_web.arg("lon").c_str(), &lon)) return sendSaveError("longitude");
+        if (lon < -180.0 || lon > 180.0)        return sendSaveError("longitude (must be -180..180)");
     }
-    if (g_web.hasArg("range")) p.putFloat("rangeKm", g_web.arg("range").toFloat());
+    if (g_web.hasArg("range")) {
+        if (!parseDoubleStrict(g_web.arg("range").c_str(), &range)) return sendSaveError("display range");
+    }
+    const int tzIdx = g_web.hasArg("tz") ? g_web.arg("tz").toInt() : -1;
+
+    Preferences p;
+    p.begin("capsuleradar", false);
+    if (g_web.hasArg("lat"))   p.putDouble("homeLat", lat);
+    if (g_web.hasArg("lon"))   p.putDouble("homeLon", lon);
+    // range: repaired, not snapped — never 0 (divides by zero in geo::projectToScreen)
+    if (g_web.hasArg("range")) p.putFloat("rangeKm", repairRangeKm((float)range));
     if (g_web.hasArg("theme")) p.putInt("theme", g_web.arg("theme").toInt());
-    if (g_web.hasArg("tz")) {
-        const int i = g_web.arg("tz").toInt();
-        if (i >= 0 && i < TZOPTS_N) p.putString("tz", TZOPTS[i].tz);
-    }
+    if (tzIdx >= 0 && tzIdx < TZOPTS_N) p.putString("tz", TZOPTS[tzIdx].tz);
     p.end();
     g_web.send(200, "text/html",
         "<meta http-equiv=refresh content='4;url=/'><body style='background:#06100a;color:#1dff86;"
@@ -654,6 +806,7 @@ static void handleSave() {
 }
 
 static void handleWifi() {
+    if (refuseIfCrossSite()) return;
     g_web.send(200, "text/html",
         "<body style='background:#06100a;color:#ffb23c;font-family:sans-serif;padding:24px'>"
         "WiFi reset. Connect to the <b>CapsuleRadar-Setup</b> network to reconfigure.</body>");
@@ -676,6 +829,7 @@ static void handleWifi() {
 }
 
 static void handleBright() {
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_brightnessDay = constrain((int)g_web.arg("v").toInt(), 5, 255);  // floor 5: 0 looks like a dead board
         applyBrightness();
@@ -690,6 +844,7 @@ static void handleBright() {
 }
 
 static void handleVol() {
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v"))    { g_volume = constrain((int)g_web.arg("v").toInt(), 0, 100); audio_set_volume(g_volume); }
     if (g_web.hasArg("mute")) { g_muted = g_web.arg("mute").toInt() != 0; audio_set_muted(g_muted); }
     if (g_web.hasArg("save")) {
@@ -707,6 +862,7 @@ static void handleVol() {
 }
 
 static void handleAlerts() {   // what triggers the alert sound (live)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("mode")) g_alertMode   = constrain((int)g_web.arg("mode").toInt(), 0, 2);
     if (g_web.hasArg("prox")) {
         g_proximityKm = g_web.arg("prox").toFloat();   // km (0 = off)
@@ -724,6 +880,7 @@ static void handleAlerts() {   // what triggers the alert sound (live)
 }
 
 static void handleIdle() {   // idle auto-dim timeout (seconds; 0 = never)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         const long s = g_web.arg("v").toInt();
         g_idleDimMs = (s <= 0) ? 0 : (uint32_t)s * 1000;
@@ -738,6 +895,7 @@ static void handleIdle() {   // idle auto-dim timeout (seconds; 0 = never)
 }
 
 static void handleUnits() {   // measurement units preset (live re-render)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_units = constrain((int)g_web.arg("v").toInt(), 0, 2);
         ui_set_units(g_units);
@@ -753,7 +911,24 @@ static void handleUnits() {   // measurement units preset (live re-render)
     g_web.send(200, "text/plain", "ok");
 }
 
+static void handleTempUnit() {   // weather temperature unit (live re-render)
+    if (refuseUnlessPageFetch()) return;
+    if (g_web.hasArg("v")) {
+        g_tempUnit = constrain((int)g_web.arg("v").toInt(), 0, 2);
+        ui_set_temp_unit(g_tempUnit);
+        ui_on_data_updated();                  // re-render the weather view if it is on screen
+        if (g_web.hasArg("save")) {
+            Preferences p;
+            p.begin("capsuleradar", false);
+            p.putInt("tempu", g_tempUnit);
+            p.end();
+        }
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
 static void handleSweep() {   // show/hide the rotating sweep line (live)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_showSweep = g_web.arg("v").toInt() != 0;
         radar::setSweepEnabled(g_showSweep);          // loop()/core 1: safe to touch LVGL
@@ -767,7 +942,22 @@ static void handleSweep() {   // show/hide the rotating sweep line (live)
     g_web.send(200, "text/plain", "ok");
 }
 
+static void handleClock() {   // idle clock on/off (live; off = the plain idle dim)
+    if (refuseUnlessPageFetch()) return;
+    if (g_web.hasArg("v")) {
+        g_clockOn = g_web.arg("v").toInt() != 0;      // loop() starts or ends it on its next pass
+        if (g_web.hasArg("save")) {
+            Preferences p;
+            p.begin("capsuleradar", false);
+            p.putBool("clock", g_clockOn);
+            p.end();
+        }
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
 static void handleTrail() {   // aircraft trail length 0/1/2/3 (live)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_trailLen = constrain((int)g_web.arg("v").toInt(), 0, 3);
         radar::setTrailLength(g_trailLen);
@@ -782,6 +972,7 @@ static void handleTrail() {   // aircraft trail length 0/1/2/3 (live)
 }
 
 static void handleAltMin() {   // minimum-altitude feed filter, ft (applies from the next poll)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_minAltFt = constrain((int)g_web.arg("v").toInt(), 0, 60000);
         g_adsb.setMinAltFt((float)g_minAltFt);
@@ -796,6 +987,7 @@ static void handleAltMin() {   // minimum-altitude feed filter, ft (applies from
 }
 
 static void handleAltMax() {   // maximum-altitude feed filter, ft (applies from the next poll)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_maxAltFt = constrain((int)g_web.arg("v").toInt(), 0, 60000);
         g_adsb.setMaxAltFt((float)g_maxAltFt);
@@ -810,6 +1002,7 @@ static void handleAltMax() {   // maximum-altitude feed filter, ft (applies from
 }
 
 static void handleMilOnly() {   // military-only feed filter (applies from the next poll)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_milOnly = g_web.arg("v").toInt() != 0;
         g_adsb.setMilitaryOnly(g_milOnly);
@@ -824,6 +1017,7 @@ static void handleMilOnly() {   // military-only feed filter (applies from the n
 }
 
 static void handleBigText() {   // accessibility: large fonts. Fonts are baked at UI creation,
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {    // so persist the flag and reboot cleanly to apply it.
         g_bigText = g_web.arg("v").toInt() != 0;
         Preferences p;
@@ -836,6 +1030,7 @@ static void handleBigText() {   // accessibility: large fonts. Fonts are baked a
 }
 
 static void handleMaxAc() {   // max aircraft drawn on the scope (live)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_maxAc = constrain((int)g_web.arg("v").toInt(), 1, ADSB_MAX_AIRCRAFT);
         radar::setMaxOnScreen(g_maxAc);
@@ -850,6 +1045,7 @@ static void handleMaxAc() {   // max aircraft drawn on the scope (live)
 }
 
 static void handleAirports() {   // show/hide airport markers (live)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_showAirports = g_web.arg("v").toInt() != 0;
         radar::setAirportsEnabled(g_showAirports);
@@ -864,6 +1060,7 @@ static void handleAirports() {   // show/hide airport markers (live)
 }
 
 static void handleFdSleep() {   // face-down sleep (screen off when flipped over) on/off
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_fdSleep = g_web.arg("v").toInt() != 0;
         if (g_web.hasArg("save")) {
@@ -877,6 +1074,7 @@ static void handleFdSleep() {   // face-down sleep (screen off when flipped over
 }
 
 static void handleGround() {   // hide/show on-ground aircraft (applies from the next feed poll)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_hideGround = g_web.arg("v").toInt() != 0;
         g_adsb.setHideGround(g_hideGround);
@@ -891,6 +1089,7 @@ static void handleGround() {   // hide/show on-ground aircraft (applies from the
 }
 
 static void handleRotate() {   // arbitrary clockwise display rotation, applied live
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_rotation = constrain((int)g_web.arg("v").toInt(), 0, 359);
         display::setRotation((uint16_t)g_rotation);
@@ -906,6 +1105,7 @@ static void handleRotate() {   // arbitrary clockwise display rotation, applied 
 }
 
 static void handleGps() {   // auto-set the centre point from the LC76G GPS (-G variant)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_useGps = g_web.arg("v").toInt() != 0;
         if (g_web.hasArg("save")) {
@@ -944,7 +1144,7 @@ static void handleUpdatePage() {
         "var x=new XMLHttpRequest(),fd=new FormData();fd.append('f',f);"
         "document.getElementById('bar').style.display='block';"
         "x.upload.onprogress=function(e){if(e.lengthComputable)document.getElementById('fill').style.width=(e.loaded/e.total*100)+'%'};"
-        "x.onload=function(){document.getElementById('msg').innerText=x.responseText+' - rebooting...'};"
+        "x.onload=function(){var t=x.responseText;document.getElementById('msg').innerText=t=='OK'?t+' - rebooting...':t;};"
         "x.onerror=function(){document.getElementById('msg').innerText='Upload failed'};"
         "x.open('POST','/update');x.send(fd);}</script></body></html>");
 }
@@ -952,14 +1152,50 @@ static void handleUpdatePage() {
 static void handleUpdateUpload() {
     HTTPUpload &up = g_web.upload();
     if (up.status == UPLOAD_FILE_START) {
+        g_updateDone = false;
+        g_updateBlocked = requestCrossSite();   // can't answer from here: 403 goes out on completion
+        if (g_updateBlocked) { Serial.println("[update] upload refused (cross-site)"); return; }
         Serial.printf("[update] start: %s\n", up.filename.c_str());
+        // An earlier upload that never reached END (page closed, WiFi drop) leaves Update
+        // "running"; begin() then fails and EVERY later upload bricks at 0 % until a
+        // reboot. Abort any stale session first, then start clean.
+        if (Update.isRunning()) Update.abort();
         if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
     } else if (up.status == UPLOAD_FILE_WRITE) {
-        if (Update.write(up.buf, up.currentSize) != up.currentSize) Update.printError(Serial);
+        if (!g_updateBlocked && Update.isRunning() &&
+            Update.write(up.buf, up.currentSize) != up.currentSize) Update.printError(Serial);
     } else if (up.status == UPLOAD_FILE_END) {
-        if (Update.end(true)) Serial.printf("[update] done: %u bytes\n", (unsigned)up.totalSize);
+        if (g_updateBlocked) return;           // refused above: nothing to finish
+        g_updateDone = Update.end(true);
+        if (g_updateDone) Serial.printf("[update] done: %u bytes\n", (unsigned)up.totalSize);
         else Update.printError(Serial);
+    } else if (up.status == UPLOAD_FILE_ABORTED) {
+        // The browser gave up mid-stream. Free the writer so the NEXT upload can begin.
+        Update.abort();
+        Serial.println("[update] upload aborted");
     }
+}
+
+// ---- WiFi: join the strongest access point, not the first one heard ----
+// The core's STA default is a fast scan, which joins the FIRST access point that answers with
+// our SSID. On a mesh (several nodes, one SSID, often one 2.4 GHz channel) that can be a far
+// node with a weak link while a strong one sits next to the radar. Scan every channel and pick
+// by signal instead; it costs a second or two at connect time.
+// setScanMethod/setSortMethod only apply when new credentials are entered (WiFi.begin(ssid,
+// pass)). Reconnecting with SAVED credentials (WiFiManager's autoConnect, our background
+// retry, the driver's auto-reconnect) reuses the stored driver config, so patch that too.
+static void wifi_prefer_strongest_ap() {
+    WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+    WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+    if (!WiFi.mode(WIFI_STA)) return;             // the driver must be up to read its config
+    wifi_config_t conf;
+    if (esp_wifi_get_config(WIFI_IF_STA, &conf) != ESP_OK) return;
+    if (conf.sta.scan_method == WIFI_ALL_CHANNEL_SCAN &&
+        conf.sta.sort_method == WIFI_CONNECT_AP_BY_SIGNAL) return;   // already set: no flash write
+    conf.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+    conf.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+    if (esp_wifi_set_config(WIFI_IF_STA, &conf) == ESP_OK)
+        Serial.println("[wifi] saved network set to join the strongest access point");
 }
 
 void setup() {
@@ -982,7 +1218,7 @@ void setup() {
     if (!display::begin()) {
         Serial.println("[!] display::begin() failed — check QSPI pins / power.");
     } else if (display::sweepAvailable()) {
-        radar::setSweepCompositor(display::sweepConfig, display::sweepTick);   // per-pixel sweep (display.cpp)
+        radar::setSweepCompositor(display::sweepConfig, display::sweepTick, display::sweepAngleDeg);   // per-pixel sweep (display.cpp)
     }
 
     // restore the saved theme, then persist any future change
@@ -1028,20 +1264,34 @@ void setup() {
     radar::setThemeChangedCb(saveTheme);
     ui_set_range_cb(onRangeChange);              // on-screen zoom button
     ui_set_units(g_units);                       // apply saved unit preset
+    ui_set_temp_unit(g_tempUnit);                // and the weather temperature unit
     ui_set_range_km(g_settings.rangeKm);         // show the loaded range
     radar::primeStaticLayers(g_settings.homeLat, g_settings.homeLon, g_settings.rangeKm);
                                                   // project coastline/airports now, don't wait for
                                                   // the first ADS-B poll to land
+    // (power-off button: registered below, only when the PMIC actually answered)
 
     imu_begin();       // face-down sleep (no-op if the IMU isn't detected)
-    battery_begin();   // AXP2101 (no-op if not detected / no battery)
+    g_pmicOk = battery_begin();   // AXP2101 (false if it did not answer)
+#if BOARD_HAS_PMIC
+    // Power-off drives the AXP2101, so offer the Stats button only when one answered
+    // (a null callback keeps it hidden; the web /poweroff also answers 501 below).
+    if (g_pmicOk)
+        ui_set_poweroff_cb([]() { g_powerOffAtMs = millis() + 600; });   // let 'Powering off' render first
+#endif
     gps_begin();       // LC76G GNSS (no-op if not the -G variant)
     gps_set_idle_hook(display::sweepTick);   // keep the sweep moving during GPS reads (it never touches I2C)
     battery_enable_codec_rail();   // power the ES8311 analog rail before audio init
 
-    setenv("TZ", TZ_STR, 1); tzset();   // local time for display even before NTP
+    setenv("TZ", g_tz.c_str(), 1); tzset();   // SAVED zone (not the Spain default): right clock before NTP
     rtc_begin();
     rtc_seed_clock();                   // offline clock/date from the PCF85063
+    // The system clock may be RTC-seeded (looks valid, might drift). Only a real SNTP
+    // sync may write the RTC back — the callback flags each sync, the 5 s tick (core 1)
+    // does the I2C write, at most hourly.
+    sntp_set_time_sync_notification_cb([](struct timeval *tv) {
+        g_rtcSyncPending = true;   // SNTP task context: flag only, no I2C here
+    });
     if (audio_begin()) {                // ES8311 alert pings (no-op if codec absent)
         audio_set_volume(g_volume);
         audio_set_muted(g_muted);
@@ -1073,6 +1323,7 @@ void setup() {
         Serial.println("[wifi] new credentials saved -> rebooting for a clean web/mDNS start");
         g_rebootAtMs = millis() + 2500;   // let the portal deliver its 'saved' page first
     });
+    wifi_prefer_strongest_ap();
     if (g_wm.autoConnect("CapsuleRadar-Setup")) {
         Serial.println("[wifi] connected");
     } else {
@@ -1089,7 +1340,7 @@ void setup() {
     wx_radar_begin();
     cloud_image_begin();
     g_ac_mutex = xSemaphoreCreateMutex();
-    xTaskCreatePinnedToCore(adsb_task, "adsb", 16384, nullptr, 1, nullptr, 0);  // TLS needs a big stack
+    xTaskCreatePinnedToCore(adsb_task, "adsb", ADSB_TASK_STACK_BYTES, nullptr, 1, nullptr, 0);  // TLS needs a big stack
 
     // configuration web page (http://capsuleradar.local/)
     g_web.on("/", handleRoot);
@@ -1099,6 +1350,7 @@ void setup() {
     g_web.on("/vol", handleVol);
     g_web.on("/alerts", handleAlerts);
     g_web.on("/idle", handleIdle);
+    g_web.on("/clock", handleClock);
     g_web.on("/fdsleep", handleFdSleep);
     g_web.on("/sweep", handleSweep);
     g_web.on("/airports", handleAirports);
@@ -1110,30 +1362,67 @@ void setup() {
     g_web.on("/maxac", handleMaxAc);
     g_web.on("/bigtext", handleBigText);
     g_web.on("/rotate", handleRotate);
+    g_web.on("/poweroff", HTTP_POST, []() {
+        if (refuseIfCrossSite()) return;
+#if !BOARD_HAS_PMIC
+        g_web.send(501, "text/plain", "power off not supported on this board");
+#else
+        // Registered the Stats button on the same condition (setup): driving the
+        // AXP2101 shutdown is the ONLY power-off path this firmware has.
+        if (!g_pmicOk) { g_web.send(501, "text/plain", "power off not supported: PMIC not detected"); return; }
+        g_web.send(200, "text/plain", "powering off");
+        g_powerOffAtMs = millis() + 800;
+#endif
+    });
     g_web.on("/gps", handleGps);
     g_web.on("/units", handleUnits);
+    g_web.on("/tempu", handleTempUnit);
     g_web.on("/update", HTTP_GET, handleUpdatePage);
     g_web.on("/update", HTTP_POST,
         []() {
-            const bool ok = !Update.hasError();
+            // Check the request itself too: a POST with no file part never reaches the
+            // upload handler, and used to answer "OK" and reboot the device.
+            const bool refused = g_updateBlocked || requestCrossSite();
+            const bool ok = !refused && g_updateDone;
+            g_updateBlocked = g_updateDone = false;
+            if (refused) { g_web.send(403, "text/plain", "cross-site request rejected"); return; }
             g_web.send(200, "text/plain", ok ? "OK" : "FAIL");
             delay(800);
             if (ok) ESP.restart();
         },
         handleUpdateUpload);
+    // The CSRF guards read Sec-Fetch-Site / Origin / X-Radar; make the server collect them.
+    static const char *WEB_GUARD_HDRS[] = {"Sec-Fetch-Site", "Origin", WEB_PAGE_HDR};
+    g_web.collectHeaders(WEB_GUARD_HDRS, sizeof(WEB_GUARD_HDRS) / sizeof(WEB_GUARD_HDRS[0]));
     g_web.begin();
+
+    applyBrightness();   // display::begin() opens at BRIGHTNESS_DEFAULT; honour the saved value
 
     Serial.println("setup done");
 }
 
 void loop() {
     display::loop();                // drive LVGL (render dirty areas + run timers)
+    audio_loop();                   // time the buzzer's beeps (boards with one)
     g_wm.process();                 // service the WiFi config portal (non-blocking)
     g_web.handleClient();           // serve the configuration web page
     if (g_useGps) gps_poll();       // pull NMEA from the LC76G (only when GPS auto-location is on)
 
     // scheduled reboot after a fresh WiFi config (see setSaveConfigCallback)
     if (g_rebootAtMs && (int32_t)(millis() - g_rebootAtMs) >= 0) { delay(50); ESP.restart(); }
+    if (g_powerOffAtMs && (int32_t)(millis() - g_powerOffAtMs) >= 0) {
+        g_powerOffAtMs = 0;
+        // The button lives on the Stats view, so the remembered view would bring the radar
+        // back up on Stats every time. A deliberate power-off starts again on the radar.
+        if (g_lastView != 0) {
+            g_lastView = 0;
+            Preferences q;
+            q.begin("capsuleradar", false);
+            q.putInt("lastview", 0);
+            q.end();
+        }
+        battery_power_off();
+    }
 
     // Car use: the saved WiFi often appears 30-60 s AFTER boot (vehicle hotspot). If we booted
     // into the portal despite having saved credentials, keep retrying them in the background;
@@ -1228,16 +1517,27 @@ void loop() {
         ui_set_feed_source(g_adsb.lastHost());   // Stats "Feed" line: who served the last data
         const bool bpresent = battery_present();
         ui_set_battery(battery_percent(), battery_charging(), bpresent);
-        g_onBattery = bpresent && !battery_charging();
+        // "On battery" must mean USB is absent, not "not charging": isCharging() goes
+        // false once the battery is FULL, which used to slow polling to 5 s on a
+        // USB-tethered, fully charged device.
+        g_onBattery = bpresent && !battery_vbus_in();
         // GPS HUD/Stats: 0 = off/no module (hidden), 1 = acquiring, 2 = fix
         const int gpsState = (!g_useGps || !gps_present()) ? 0 : (gps_has_fix() ? 2 : 1);
         ui_set_gps(gpsState, gps_satellites(), gps_altitude_m());
-        // once NTP has a real fix, persist it to the RTC (core 1 only)
-        if (!g_rtcSynced && time(nullptr) > 1700000000L) {
+        // Write the RTC only after a REAL SNTP sync (flagged by the callback in setup),
+        // and at most hourly — the boot clock is RTC-seeded and looks valid too, which
+        // used to let the 5 s tick write drift right back over a good time source.
+        static uint32_t lastRtcWriteMs = 0;
+        if (g_rtcSyncPending &&
+            (lastRtcWriteMs == 0 || millis() - lastRtcWriteMs >= 3600000UL)) {
             time_t now = time(nullptr);
             struct tm utc;
             gmtime_r(&now, &utc);
-            if (rtc_write(&utc)) { g_rtcSynced = true; Serial.println("[rtc] saved NTP time"); }
+            if (now > 1700000000L && rtc_write(&utc)) {   // sanity: a synced clock is past 2023
+                g_rtcSyncPending = false;                 // cleared only on success: retry on I2C error
+                lastRtcWriteMs = millis();
+                Serial.println("[rtc] saved NTP time");
+            }
         }
         // GPS auto-location (-G variant): re-centre the radar when the fix moves enough.
         if (g_useGps) {
@@ -1254,25 +1554,29 @@ void loop() {
         }
     }
 
-    // face-down -> screen off (IMU); flip face-up to wake
+    // face-down -> screen off (IMU); flip face-up or touch to wake (see facedown_sleep.h)
     static uint32_t lastImu = 0;
-    static int fdCount = 0;
-    if (millis() - lastImu > 400) {
-        lastImu = millis();
-        const int fd = imu_facedown();              // 1 down, 0 not, -1 read error
-        if (fd > 0)       { if (fdCount < 8) fdCount++; }
-        else if (fd == 0) fdCount = 0;              // -1 (I2C hiccup): leave the counter as-is
-        // tap-to-wake: a touch while dark means the pose detection is wrong (tilted mount,
-        // drifted baseline) — wake up and adopt the current pose as the new resting one.
-        if (g_asleep && display::inactiveMs() < 400) { fdCount = 0; imu_rebaseline(); }
-        const bool sleep = g_fdSleep && (fdCount >= 4);   // ~1.6 s face-down (web toggle)
-        const bool idle  = g_idleDimMs > 0 && display::inactiveMs() > g_idleDimMs;
-        if (sleep != g_asleep || idle != g_idle) {
-            g_asleep = sleep;
-            g_idle = idle;
-            applyBrightness();
-        }
+    static FaceDownSleep faceDown;
+    const uint32_t nowImu = millis();
+    if (nowImu - lastImu > FACEDOWN_CHECK_MS) {
+        const bool touched = touchedSinceLastCheck(display::inactiveMs(), nowImu - lastImu);
+        lastImu = nowImu;
+        int16_t az = 0;
+        const bool haveAz = imu_read_az(&az);
+        faceDown.update(haveAz, az, touched, g_fdSleep);   // g_fdSleep: web toggle
+        g_asleep = faceDown.asleep();   // applyBrightness() below: dark (0) also makes a touch only wake it
     }
+
+    // Idle: the clock, or the plain dim. Checked on every pass, so the touch that wakes the
+    // radar sends the clock away at once. The clock needs the radar view on screen and a
+    // known time (radar::setClock refuses without one, and is asked again next pass).
+    g_idle = g_idleDimMs > 0 && display::inactiveMs() > g_idleDimMs;
+    const bool wantClock = g_clockOn && g_idle && ui_sweep_visible();
+    g_clockHold = wantClock && radar::emergencyInRange();      // an emergency nearby: radar stays up
+    const bool showClock = wantClock && !g_clockHold;
+    if (showClock != radar::clockRequested() && radar::setClock(showClock))
+        Serial.println(showClock ? "[clock] idle: radar -> clock" : "[clock] radar is back");
+    applyBrightness();
 
     delay(5);
 }

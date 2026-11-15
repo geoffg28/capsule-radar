@@ -1,7 +1,7 @@
 #pragma once
 // Capsule Radar — build & user configuration.
 
-#define FW_VERSION "1.4.8"   // shown on the web config page + Stats screen; bump on release
+#define FW_VERSION "1.8.1"   // shown on the web config page + Stats screen; bump on release
 
 // ---------- Home location (default: Dénia, Spain) ----------
 // Overridable at runtime via the captive portal (stored in NVS).
@@ -23,6 +23,15 @@ static const float RANGE_STEPS_KM[] = {5.0f * NM_TO_KM, 10.0f * NM_TO_KM, 15.0f 
 #define ADSB_QUERY_MULT     1.4f
 #define ADSB_QUERY_MIN_KM   12.0f
 #define ADSB_QUERY_MAX_KM   150.0f
+// Display-range presets. The zoom button on the scope cycles RANGE_STEPS_KM (the NM steps
+// above); the web page's <select> offers WEB_RANGE_KM, the same NM steps so the page and the
+// screen always agree. Nothing goes past 150 km: the feed query clamps to ADSB_QUERY_MAX_KM,
+// so a wider range promised rings the feed never fills. A stored range outside
+// [RANGE_KM_MIN, RANGE_KM_MAX] is clamped at boot and on save; <= 0, NaN or inf becomes
+// RANGE_KM_DEFAULT (0 divides by zero in geo::projectToScreen).
+static const float WEB_RANGE_KM[]   = {5.0f * NM_TO_KM, 10.0f * NM_TO_KM, 15.0f * NM_TO_KM, 20.0f * NM_TO_KM, 50.0f * NM_TO_KM};
+#define RANGE_KM_MIN        (5.0f * NM_TO_KM)    // smallest NM step (9.26 km)
+#define RANGE_KM_MAX        150.0f
 #define POLL_INTERVAL_MS    2000           // be gentle with the free API (>=1000)
 #define POLL_INTERVAL_BATTERY_MS 5000      // slower polling when running on battery
 #define MOTION_INTERP       1              // 1 = glyphs glide between polls; 0 = snap to new pos
@@ -33,12 +42,14 @@ static const float RANGE_STEPS_KM[] = {5.0f * NM_TO_KM, 10.0f * NM_TO_KM, 15.0f 
 #define WX_RADAR_REFRESH_MS 300000UL       // RainViewer frames update about every 5 minutes
 #define CLOUD_IMAGE_REFRESH_MS 600000UL    // EUMETSAT MTG cloud imagery; cache for 10 minutes
 
-// ---------- Screen (CO5300 AMOLED, 466x466 on every supported board) ----------
+// ---------- Screen geometry (AMOLED defaults; LCD 2.1 overrides below) ----------
+#if !defined(BOARD_LCD21)
 #define SCREEN_W            466
 #define SCREEN_H            466
 #define SCREEN_CX           233
 #define SCREEN_CY           233
 #define RADAR_R_OUTER_PX    218            // outer ring radius in pixels
+#endif
 // radar sweep (radar_view.cpp draws it in LVGL; display.cpp's compositor draws it per pixel)
 #define SWEEP_PERIOD_MS     8000           // one revolution (LVGL sweep)
 #define SWEEP_COMP_PERIOD_MS 40000         // one revolution when the compositor draws it (a slower sweep hides the
@@ -57,9 +68,64 @@ static const float RANGE_STEPS_KM[] = {5.0f * NM_TO_KM, 10.0f * NM_TO_KM, 15.0f 
 #define LV_COLOR_DEPTH_BITS 16
 // LCD_COL_OFFSET / LCD_ROW_OFFSET / LCD_QSPI_HZ are panel-specific -> board header.
 #define BRIGHTNESS_DEFAULT  200            // 0..255, panel brightness via cmd 0x51
+// Face-down sleep (QMI8658, logic in facedown_sleep.h): the IMU is read every
+// FACEDOWN_CHECK_MS, and FACEDOWN_COUNT face-down readings in a row with no touch in between
+// turn the screen off (~1.6 s). Accelerometer Z at ±2 g full scale: 16384 LSB/g.
+#define FACEDOWN_CHECK_MS   400
+#define FACEDOWN_COUNT      4
+#define FACEDOWN_THRESHOLD  9000           // ~0.55 g past zero, on the side opposite the resting pose
 #define TZ_STR              "CET-1CEST,M3.5.0,M10.5.0/3"  // POSIX TZ (Spain) for local time/date
 #define BRIGHTNESS_IDLE     25             // dimmed after no touch for IDLE_DIM_MS
 #define IDLE_DIM_MS         20000          // dim the screen after this long without a touch
+// Idle clock: instead of dimming, the radar animates into an analog clock (clock_face.h has
+// the animation, radar_view.cpp the dial and the dimmed scene, display.cpp's compositor the
+// moving hands). Angles 0 = 12 o'clock; lengths are fractions of RADAR_R_OUTER_PX.
+#define CLOCK_ENTER_MS        2000      // radar -> clock animation
+#define CLOCK_EXIT_MS         1200      // clock -> radar animation
+#define CLOCK_LOCK_FRAC       0.75f     // the spinning sweep line is on the second from here on
+#define CLOCK_MIN_SPIN_DEG    120.0f    // ...after spinning forward at least this far
+#define CLOCK_RADAR_OPA       150       // planes, trails, rings, map behind the clock (255 = as usual)
+#define CLOCK_RADAR_OPA_STEP1 200       // ...during the first step of the animation
+#define CLOCK_TRAIL_OPA       150       // sweep trail behind the second hand (255 = the radar's)
+#define CLOCK_BRIGHTNESS_PCT  70        // panel brightness on the clock, % of the day brightness
+#define CLOCK_HOUR_LEN        0.50f     // hands
+#define CLOCK_MIN_LEN         0.76f
+#define CLOCK_SEC_LEN         0.94f
+#define CLOCK_SEC_TAIL        0.14f     // second hand: tail past the centre
+#define CLOCK_HOUR_W          8         // hand widths, px
+#define CLOCK_MIN_W           5
+#define CLOCK_OUTLINE_W       4         // dark outline around the hour/minute hands (extra width, px)
+#define CLOCK_OUTLINE_OPA     200
+#define CLOCK_CAP_R           7         // centre cap radius, px
+#define CLOCK_CAP_DOT_R       3         // lead-coloured dot on the cap, px
+#define CLOCK_NUM_R           0.84f     // dial: centre of the 12/3/6/9 numbers
+#define CLOCK_HTICK_R0        0.90f     // hour marks run from here to CLOCK_TICK_R1
+#define CLOCK_MTICK_R0        0.965f    // minute marks run from here to CLOCK_TICK_R1
+#define CLOCK_TICK_R1         0.995f
+#define CLOCK_NUM_OPA         190       // the dial never moves, so it stays dim (AMOLED burn-in)
+#define CLOCK_HTICK_OPA       170
+#define CLOCK_MTICK_OPA       80
+
+// ---------- Touch ----------
+// A still hold on the radar this long cycles the theme, on lift (ui.cpp). LVGL's 400 ms long
+// press caught firm taps: tapping off a plane card with a half-second press changed the theme.
+#define UI_THEME_HOLD_MS        1500
+// LVGL reads the touch panel only between frames, and a swipe redraws the whole screen on
+// every frame (~150-200 ms on the device). display.cpp also samples the panel between the
+// flush strips of a frame and replays the samples to LVGL in order (touch_queue.h).
+// At most one panel read per TOUCH_SAMPLE_MS between strips. Keep it at LVGL's read period
+// (LV_INDEV_DEF_READ_PERIOD in include/lv_conf.h): LVGL predicts a swipe's throw from the
+// movement per read, so denser samples shrink the throw and short flicks snap back.
+#define TOUCH_SAMPLE_MS         20
+#define TOUCH_NODATA_RELEASE_MS 100  // failed reads for this long while pressed count as a lift
+#define TOUCH_QUEUE_LEN         32   // samples held between two LVGL reads (a full frame adds ~10)
+// The plane card's X (ui.cpp): its tap area grows this much on every side, inside the card.
+// On a 1.43, taps aimed at the X landed up to 32 px below its centre (@h0verin, #57); 21
+// reaches 35 px below the centre of the normal-size X.
+#define UI_CARD_CLOSE_HIT       21
+// A tap this close outside the open card closes it instead of picking a plane (ui.cpp). On
+// that 1.43, 12 of the 13 taps that went off the card landed within 11 px of its edge.
+#define UI_CARD_CLOSE_MARGIN    12
 
 // ---------- ADS-B API (free, non-commercial) ----------
 // Providers are tried in this order; each is paced independently (see AdsbClient).
@@ -88,7 +154,32 @@ static const float RANGE_STEPS_KM[] = {5.0f * NM_TO_KM, 10.0f * NM_TO_KM, 15.0f 
 #define ADSB_SPACING_STEP_MS    4000UL      // first extra gap imposed after a 429
 #define ADSB_SPACING_MAX_MS    60000UL      // never space a provider out further than this
 #define ADSB_SPACING_EASE_OKS       3       // successes needed before easing the gap back down
+#define ADSB_SPACING_EASE_QUIET_MS 600000UL // ...and this long without a 429 since the last back-off or ease
+                                            // (one step down per quiet spell, so a fixed limit is not re-tripped
+                                            // every minute: airplanes.live was 429ing every ~100 s at 2 s polls)
+#define ADSB_SPACING_PROBE_MS 3600000UL  // never ease back to a spacing that drew a 429 until this long after it
+                                        // (stops one-radar airplanes.live tripping every quiet spell; it holds
+                                        // 4 s fine but 2 s trips within seconds)
+// While EVERY provider we may ask is silent (parked, or failing at the transport level),
+// the silence gap (ADSB_SPACING_STEP_MS doubling up to ADSB_SPACING_MAX_MS) is capped at
+// this. A network-wide outage then costs at most this long after the link returns, not a
+// minute; a provider that stays dead while another one answers still waits the full gap.
+// The 429 spacing is not capped. See AdsbPacer::cooling().
+#define ADSB_SILENCE_OUTAGE_MAX_MS 10000UL
 #define ADSB_FEED_STALE_MS     60000UL      // no successful fetch for this long -> HUD warning
+// The feed-stuck watchdog (FeedWatchdog in feed_watchdog.h) calls the feed stuck when WiFi
+// is up and no provider has answered for ADSB_STUCK_MS. It may then reboot only when the
+// largest free INTERNAL heap block is below ADSB_STUCK_MIN_LARGEST_BLOCK: a TLS handshake
+// needs a contiguous block of roughly this size (photo_client.cpp skips a whole photo fetch
+// below the same figure). Above it, a stuck feed is an internet outage, not heap
+// fragmentation — stay up, warn amber.
+#define ADSB_STUCK_MS         180000UL
+#define ADSB_STUCK_MIN_LARGEST_BLOCK 28000
+// Last resort, independent of the heap check: WiFi up and no provider has answered for
+// this long -> restart anyway. Covers a stuck feed whose cause the heap figure does not
+// show (a wedged network stack, a socket that never closes). An outage that ends sooner
+// never gets here: the first answer resets the clock.
+#define ADSB_STUCK_HARD_MS    1800000UL     // 30 min
 
 // ---------- Debug ----------
 #define DEBUG_MEM           0               // 1 = print a [mem] heap/fps line every 5s on serial
@@ -97,11 +188,14 @@ static const float RANGE_STEPS_KM[] = {5.0f * NM_TO_KM, 10.0f * NM_TO_KM, 15.0f 
 // The pin map, panel gaps, touch driver and which peripherals exist all live in a
 // per-board header. Select one with a build flag in platformio.ini; the 1.75 is the
 // default so an unflagged build behaves exactly as before.
+//   -DBOARD_LCD21       -> Waveshare ESP32-S3-Touch-LCD-2.1
 //   -DBOARD_AMOLED_143  -> Waveshare ESP32-S3-Touch-AMOLED-1.43
 //   (none)              -> Waveshare ESP32-S3-Touch-AMOLED-1.75  (reference board)
 // Never guess pins for a new board: take them from the vendor demo or the Arduino
 // core board variant, then confirm them on hardware before committing.
-#if defined(BOARD_AMOLED_143)
+#if defined(BOARD_LCD21)
+#  include "boards/board_lcd_21.h"
+#elif defined(BOARD_AMOLED_143)
 #  include "boards/board_amoled_143.h"
 #else
 #  include "boards/board_amoled_175.h"
@@ -110,4 +204,13 @@ static const float RANGE_STEPS_KM[] = {5.0f * NM_TO_KM, 10.0f * NM_TO_KM, 15.0f 
 // Safety net: catches a board header that still has placeholder pins in it.
 #if (PIN_LCD_SCLK < 0) || (PIN_I2C_SDA < 0)
 #  error "board header: QSPI/I2C pins are placeholders (-1). Fill in the real values."
+#endif
+
+#ifndef ADSB_TASK_STACK_BYTES
+#define ADSB_TASK_STACK_BYTES 16384
+#endif
+
+// An on/off buzzer instead of a codec (the LCD 2.1): see audio.cpp.
+#ifndef BOARD_HAS_BUZZER
+#define BOARD_HAS_BUZZER 0
 #endif
