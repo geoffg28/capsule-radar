@@ -73,6 +73,9 @@ jobs:
 
   deploy:
     needs: build
+    # Forks usually don't have Pages enabled, so deploy-pages fails there with a 404 on every
+    # push to main. Publish only from the original repo; forks still run the build above.
+    if: ${{ !github.event.repository.fork }}
     runs-on: ubuntu-latest
     environment:
       name: github-pages
