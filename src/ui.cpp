@@ -864,6 +864,9 @@ void ui_on_data_updated(void) {
         lv_label_set_text(s_hudCount, cbuf);
     }
     refresh_active_tile();   // only the visible tile pays the rebuild cost
+#if UI_SIDE_LIST_W > 0
+    build_list();            // the docked list is always visible
+#endif
 }
 
 // ------------------------------------------------------------------- building
@@ -976,7 +979,11 @@ static void build_card(void) {
 }
 
 void ui_show_view(int idx) {
-    if (s_tv && idx >= 0 && idx <= 3) lv_obj_set_tile_id(s_tv, (uint32_t)idx, 0, LV_ANIM_OFF);
+    if (!s_tv || idx < 0 || idx > 3) return;
+    // By tile, not by column: with the list docked (UI_SIDE_LIST_W) there is no list tile and
+    // the columns shift. A saved "list" view then opens the radar, which sits beside the list.
+    lv_obj_t *const tiles[4] = { s_tileRadar, s_tileList, s_tileStats, s_tileWeather };
+    lv_obj_set_tile(s_tv, tiles[idx] ? tiles[idx] : s_tileRadar, LV_ANIM_OFF);
 }
 
 // ------------------------------------------------------------------- splash
@@ -999,7 +1006,7 @@ static void splash_dismiss_cb(lv_timer_t *t) {
 void ui_splash_show(void) {
     lv_obj_t *cont = lv_obj_create(lv_layer_top());
     lv_obj_remove_style_all(cont);
-    lv_obj_set_size(cont, SCREEN_W, SCREEN_H);
+    lv_obj_set_size(cont, PANEL_W, PANEL_H);   // the whole panel, docked list included
     lv_obj_center(cont);
     lv_obj_set_style_bg_color(cont, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(cont, LV_OPA_COVER, 0);
@@ -1055,9 +1062,16 @@ void ui_create(void) {
     lv_obj_set_scrollbar_mode(s_tv, LV_SCROLLBAR_MODE_OFF);
 
     s_tileRadar = lv_tileview_add_tile(s_tv, 0, 0, LV_DIR_RIGHT);
+#if UI_SIDE_LIST_W > 0
+    // Landscape panel: the list is docked beside the radar pane (below), not a tile.
+    // The pane swipes radar / stats / weather; s_tileList stays null.
+    s_tileStats = lv_tileview_add_tile(s_tv, 1, 0, LV_DIR_HOR);
+    s_tileWeather = lv_tileview_add_tile(s_tv, 2, 0, LV_DIR_LEFT);
+#else
     s_tileList  = lv_tileview_add_tile(s_tv, 1, 0, LV_DIR_HOR);
     s_tileStats = lv_tileview_add_tile(s_tv, 2, 0, LV_DIR_HOR);
     s_tileWeather = lv_tileview_add_tile(s_tv, 3, 0, LV_DIR_LEFT);
+#endif
     // Rebuild the list/stats with the latest data the moment they slide into view
     // (between polls they'd otherwise show whatever was there when last visible).
     lv_obj_add_event_cb(s_tv, [](lv_event_t *) {
@@ -1172,12 +1186,32 @@ void ui_create(void) {
     lv_obj_add_event_cb(s_clockCatcher, clock_catcher_release_cb, LV_EVENT_PRESS_LOST, NULL);
     radar::setClockStageCb(clock_stage_cb);
 
+#if UI_SIDE_LIST_W > 0
+    // --- docked list: a full-height column right of the radar pane, always on screen ---
+    lv_obj_t *lp = lv_obj_create(scr);
+    lv_obj_remove_style_all(lp);
+    lv_obj_set_size(lp, UI_SIDE_LIST_W, SCREEN_H);
+    lv_obj_set_pos(lp, SCREEN_W, 0);
+    lv_obj_set_style_bg_color(lp, lv_color_hex(0x05100A), 0);
+    lv_obj_set_style_bg_opa(lp, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_side(lp, LV_BORDER_SIDE_LEFT, 0);   // a divider against the radar pane
+    lv_obj_set_style_border_color(lp, UI_GREEN, 0);
+    lv_obj_set_style_border_opa(lp, 50, 0);
+    lv_obj_set_style_border_width(lp, 2, 0);
+    lv_obj_clear_flag(lp, LV_OBJ_FLAG_SCROLLABLE);
+    make_tile_title(lp, "AIRCRAFT");
+    s_list = lv_list_create(lp);
+    lv_obj_set_size(s_list, UI_SIDE_LIST_W - 2 * UI_SIDE_LIST_PAD, SCREEN_H - UI_SIDE_LIST_TOP - UI_SIDE_LIST_PAD);
+    lv_obj_align(s_list, LV_ALIGN_BOTTOM_MID, 0, -UI_SIDE_LIST_PAD);
+    lv_obj_set_style_pad_hor(s_list, 0, 0);   // rows use the column's full width (large text needs it)
+#else
     // --- list tile (circular panel, clipped to the round screen) ---
     lv_obj_t *lp = make_round_panel(s_tileList);
     make_tile_title(lp, "AIRCRAFT");
     s_list = lv_list_create(lp);
     lv_obj_set_size(s_list, s_bigText ? 340 : 300, 372);   // wider rows so big-font distances don't clip
     lv_obj_align(s_list, LV_ALIGN_CENTER, 0, 22);
+#endif
     lv_obj_set_style_bg_opa(s_list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_list, 0, 0);
     lv_obj_set_style_pad_row(s_list, 2, 0);
@@ -1234,7 +1268,7 @@ void ui_create(void) {
     // hold-progress ring round the screen edge (top layer, so it shows over the Stats tile)
     s_offRing = lv_arc_create(lv_layer_top());
     lv_obj_set_size(s_offRing, SCREEN_W, SCREEN_H);
-    lv_obj_center(s_offRing);
+    lv_obj_set_pos(s_offRing, 0, 0);                  // over the radar pane (= the whole screen on the round boards)
     lv_obj_remove_style(s_offRing, NULL, LV_PART_KNOB);
     lv_obj_clear_flag(s_offRing, LV_OBJ_FLAG_CLICKABLE);
     lv_arc_set_rotation(s_offRing, 270);              // 0 degrees = 12 o'clock

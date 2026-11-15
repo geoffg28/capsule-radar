@@ -84,6 +84,36 @@ full-panel rim-ring test card one pixel at a time until it centred.
 
 ---
 
+## ESP32-P4-WIFI6-Touch-LCD-7B (7" landscape, not yet confirmed on hardware)
+Build with `-e esp32-p4-lcd-7b`; preview the layout on the desktop with `-e native-p4-7b`.
+Pin map: `src/boards/board_p4_lcd_7b.h`.
+
+A different SoC family from the boards above: ESP32-P4 (dual RISC-V, 32 MB PSRAM, 32 MB
+flash) with an ESP32-C6 over SDIO for WiFi (esp-hosted; the Arduino core's `WiFi.h` hides
+it). It needs Arduino core 3.3.x, so its env pins a newer pioarduino platform.
+
+| Part | Detail |
+|------|--------|
+| Panel | EK79007, 1024x600 IPS, 2-lane MIPI-DSI at 1000 Mbit/s per lane, 52 MHz pixel clock. Reset GPIO33. |
+| Backlight | LEDC PWM on GPIO32, 5 kHz, 10-bit, **active low** |
+| I2C | SDA GPIO7, SCL GPIO8 (touch, ES8311 `0x18`, ES7210 `0x40`) |
+| Touch | GT911 at `0x5D` or `0x14` (both probed), polled; INT and RST are not wired to GPIOs in the vendor example |
+| Audio | ES8311 + speaker (MCLK 13, BCLK 12, LRCK 10, DOUT 9, amp enable 53), ES7210 mics (DIN 11). Compiled out for now (`BOARD_HAS_AUDIO 0`). |
+| Not fitted | PMIC, IMU, I2C RTC |
+
+Everything in that table is lifted from Waveshare's Arduino examples for the board
+(`examples/arduino` in github.com/waveshareteam/ESP32-P4-WIFI6-Touch-LCD-7B). **None of it
+has been confirmed on a real board yet**: do the I2C scan and a full-panel test pattern
+before trusting it, then delete the warning at the top of the board header.
+
+Layout: the panel is split instead of round. `SCREEN_W/H` (683x600) is the radar pane on
+the left two thirds, where the shared UI lays itself out exactly as on the round boards;
+`UI_SIDE_LIST_W` (341) docks the aircraft list in the right third, so the list is always
+on screen and the pane swipes radar / stats / weather. `PANEL_W/H` is the physical panel.
+
+Driver notes (`display_dsi_ek79007.cpp`): no sweep compositor (LVGL draws the sweep),
+rotation 0 or 180 only, brightness through the backlight PWM.
+
 ## Adding another board
 
 1. Copy a header in `src/boards/`, fill in the pins **from the vendor demo or the Arduino
@@ -98,4 +128,5 @@ full-panel rim-ring test card one pixel at a time until it centred.
 ## Reference
 - 1.75 wiki: https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75
 - 1.43 wiki: https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.43
+- P4 7B docs: https://docs.waveshare.com/ESP32-P4-WIFI6-Touch-LCD-7B (examples: https://github.com/waveshareteam/ESP32-P4-WIFI6-Touch-LCD-7B)
 - ESPHome device page (1.75 pin source): https://devices.esphome.io/devices/waveshare-esp32-s3-touch-amoled-175/

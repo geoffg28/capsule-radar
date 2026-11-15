@@ -35,6 +35,18 @@ porting there. Build with `-e esp32-s3-lcd-21`: `custom_sdkconfig` rebuilds ESP-
 first build is slow. The sideways shift (#49) was fixed in #54 (bounce buffers + page flip);
 after changing `custom_sdkconfig`, delete `sdkconfig.esp32-s3-lcd-21` or the old values stick.
 
+### Fourth board (in progress, NOT yet run on hardware): ESP32-P4-WIFI6-Touch-LCD-7B
+A 7" 1024x600 landscape IPS (EK79007, MIPI-DSI) on an **ESP32-P4**, GT911 touch, WiFi through
+an on-board ESP32-C6 (esp-hosted). Pins in `src/boards/board_p4_lcd_7b.h`, from Waveshare's
+Arduino examples and still unconfirmed on a real board. Display glue is
+`src/display_dsi_ek79007.cpp` (a third copy of the `display::` API: no sweep compositor,
+rotation 0/180 only), touch is `src/touch_gt911.cpp`. Build with `-e esp32-p4-lcd-7b`
+(newer pioarduino platform, Arduino core 3.3.x).
+The screen is split, not round: `SCREEN_W/H` is the radar pane (left two thirds, the shared
+UI lays itself out in it unchanged) and `UI_SIDE_LIST_W` docks the aircraft list in the
+right third; `PANEL_W/H` is the physical panel. `-e native-p4-7b` runs that layout in the
+desktop simulator, which is how it was developed.
+
 ## Stack decision
 **PlatformIO + Arduino framework.** Libraries:
 - `moononournation/GFX Library for Arduino` (Arduino_GFX) — CO5300 QSPI panel driver + framebuffer.
@@ -98,6 +110,8 @@ coastline data, and `sim_main.cpp` (the desktop SDL simulator).
 pio run -e esp32-s3-amoled-175              # build (reference board)
 pio run -e esp32-s3-amoled-143              # build (1.43)
 pio run -e esp32-s3-lcd-21                  # build (LCD 2.1, experimental)
+pio run -e esp32-p4-lcd-7b                  # build (P4 7" landscape, untested on hardware)
+pio run -e native-p4-7b -t exec             # desktop simulator, P4 7" split layout
 pio run -e esp32-s3-amoled-175 -t upload    # flash over USB-C
 pio device monitor -b 115200                # serial
 ```
