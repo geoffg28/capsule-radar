@@ -11,10 +11,10 @@
 //  github.com/waveshareteam/ESP32-P4-WIFI6-Touch-LCD-7B: libraries/displays/displays_config.h,
 //  i2c.h, gt911.h and 09_Audio_Playback), not guessed.
 //
-//  !! NOT YET CONFIRMED ON HARDWARE. The project rule is an I2C scan plus a full-panel test
-//  !! pattern before a pin map counts as confirmed. This header was written before the board
-//  !! was on the desk; the layout it drives was checked in the desktop simulator only
-//  !! (pio run -e native-p4-7b). Remove this note once a real board has booted it.
+//  Booted on a real board (chip rev v3.x, November 2026): panel, backlight, GT911 touch and
+//  the SDIO link to the C6 are confirmed. The audio pins are NOT yet exercised (audio is
+//  compiled out). The C6 needs its ESP-Hosted firmware updated once per board first:
+//  see docs/HARDWARE.md and tools/c6_update/.
 // ---------------------------------------------------------------------------
 
 #define BOARD_NAME          "ESP32-P4-WIFI6-Touch-LCD-7B"

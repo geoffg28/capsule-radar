@@ -55,9 +55,8 @@ jobs:
           set -euo pipefail
           b=".pio/build/$PIO_ENV"
           mkdir -p firmware
-          # ESP32-P4 (untested on hardware): only the OTA image for now. A merged USB image needs
-          # the P4's own flash layout (bootloader offset, 32 MB flash), to be added once a real
-          # board has booted this firmware.
+          # ESP32-P4: only the OTA image for now. A merged USB image needs the P4's own flash
+          # layout (bootloader at 0x2000, 32 MB flash) and is not wired up yet.
           if [ "$PIO_ENV" = "esp32-p4-lcd-7b" ]; then
             cp "$b/firmware.bin" "firmware/CapsuleRadar-ota-p4lcd7b.bin"
             exit 0

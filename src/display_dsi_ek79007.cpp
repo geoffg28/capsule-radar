@@ -46,7 +46,11 @@ static Arduino_ESP32DSIPanel *s_dsi = nullptr;
 static Arduino_DSI_Display   *s_gfx = nullptr;
 
 // --- LVGL plumbing -----------------------------------------------------------
-#define LVGL_BUF_LINES 60    // partial draw-buffer height (lines); internal RAM if it fits
+// The draw buffer lives in PSRAM, NOT internal RAM. On the P4 every WiFi byte comes from
+// the C6 over SDIO into DMA-capable internal RAM; a 120 KB internal draw buffer left ~3 KB
+// of it, so the first large reply (a WiFi scan) could not be received, the ESP-Hosted
+// link wedged and the setup portal froze, then crashed. P4 PSRAM is fast enough for LVGL.
+#define LVGL_BUF_LINES 60    // partial draw-buffer height (lines), in PSRAM
 static lv_disp_draw_buf_t s_draw_buf;
 static lv_disp_drv_t      s_disp_drv;
 static lv_indev_drv_t     s_indev_drv;
@@ -147,11 +151,7 @@ bool begin() {
     lv_init();
 
     const size_t buf_px = (size_t)PANEL_W * LVGL_BUF_LINES;
-    s_buf1 = (lv_color_t *)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_INTERNAL);
-    if (!s_buf1) {
-        Serial.println("[display] internal draw buffer failed; falling back to PSRAM");
-        s_buf1 = (lv_color_t *)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
-    }
+    s_buf1 = (lv_color_t *)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
     if (!s_buf1) {
         Serial.println("[display] draw buffer allocation FAILED");
         return false;

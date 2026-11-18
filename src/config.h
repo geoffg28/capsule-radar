@@ -181,8 +181,25 @@ static const float WEB_RANGE_KM[]   = {5.0f * NM_TO_KM, 10.0f * NM_TO_KM, 15.0f 
 // never gets here: the first answer resets the clock.
 #define ADSB_STUCK_HARD_MS    1800000UL     // 30 min
 
+// ESP-Hosted boards (P4: WiFi is an ESP32-C6 over SDIO). If the C6 stops answering, every
+// WiFi call blocks for ESP-Hosted's 5 s RPC timeout and the UI loop freezes. A small task of
+// its own (core 0; not the UI loop, and not the ADS-B task, which may be the thing stuck)
+// asks the C6 for its WiFi mode this often, and restarts the board - which also resets the
+// C6 - after this many unanswered checks in a row.
+#define HOSTED_PROBE_INTERVAL_MS  15000UL
+#define HOSTED_PROBE_MAX_FAILS    2
+#define HOSTED_PROBE_SLOW_MS      3000UL    // an answer slower than this counts as unanswered
+#define HOSTED_PROBE_STACK_BYTES  4096
+// ...and the ADS-B task is on the ESP-IDF task watchdog: a pass that has not come round in
+// this long (a fetch blocked for good on a wedged data path, which the C6 probe can miss)
+// panics and restarts. Far above a slow legitimate pass: per-call timeouts are <= ~14 s and
+// one pass may try three providers, a photo and the weather.
+#define ADSB_TASK_WDT_MS          120000UL
+
 // ---------- Debug ----------
+#ifndef DEBUG_MEM                           // -DDEBUG_MEM=1 from the build flags also works
 #define DEBUG_MEM           0               // 1 = print a [mem] heap/fps line every 5s on serial
+#endif
 
 // ---------- Board ----------
 // The pin map, panel gaps, touch driver and which peripherals exist all live in a

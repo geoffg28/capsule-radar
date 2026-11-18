@@ -39,6 +39,10 @@
 #include <esp_heap_caps.h>          // largest-free-block metric (heap health)
 #include <esp_wifi.h>               // WiFi driver control (reset must survive the reboot)
 #include <nvs.h>                    // erase the driver's "nvs.net80211" namespace (WiFi reset)
+#if CONFIG_ESP_HOSTED_ENABLED
+#include "esp32-hal-hosted.h"       // C6 co-processor liveness (hosted_probe_task)
+#include <esp_task_wdt.h>           // ADS-B task watchdog
+#endif
 #include <mbedtls/platform.h>       // route mbedTLS allocations to PSRAM
 
 // mbedTLS allocates from internal RAM by default (the prebuilt core has
@@ -127,6 +131,52 @@ static const struct { const char *label; const char *tz; int offMin; int dst; } 
 static const int TZOPTS_N = sizeof(TZOPTS) / sizeof(TZOPTS[0]);
 
 // ---- networking task (core 0): fetch + parse, never touches the display ----
+#if CONFIG_ESP_HOSTED_ENABLED
+// Liveness check for the WiFi co-processor (see HOSTED_PROBE_* in config.h). A task of its
+// own: not the UI loop, and not the ADS-B task, which blocks inside fetches and would take
+// the check down with it. A hung C6 otherwise freezes the UI for good: every WiFi call from
+// loop() (WiFiManager, the reconnect retry) waits out a 5 s RPC timeout.
+static void hosted_probe_task(void *) {
+    int fails = 0;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(HOSTED_PROBE_INTERVAL_MS));
+        if (!hostedIsInitialized()) continue;
+        wifi_mode_t mode;
+        const uint32_t t0 = millis();
+        const esp_err_t err = esp_wifi_get_mode(&mode);
+        const uint32_t took = millis() - t0;
+        if (err == ESP_OK && took < HOSTED_PROBE_SLOW_MS) {
+            fails = 0;
+            continue;
+        }
+        fails++;
+        Serial.printf("[wifi] C6 co-processor not answering (%s, %lu ms) - %d/%d\n",
+                      esp_err_to_name(err), (unsigned long)took, fails, HOSTED_PROBE_MAX_FAILS);
+        if (fails >= HOSTED_PROBE_MAX_FAILS) {
+            Serial.println("[wifi] C6 hung -> restarting (also resets the C6)");
+            Serial.flush();
+            vTaskDelay(pdMS_TO_TICKS(100));
+            ESP.restart();
+        }
+    }
+}
+
+// Put the calling task (the ADS-B task) on the ESP-IDF task watchdog with a limit of
+// ADSB_TASK_WDT_MS. The TWDT config is global: this also stops it watching the idle tasks
+// (idle_core_mask 0), which a 120 s limit would make meaningless anyway.
+static void adsb_task_watchdog_begin() {
+    esp_task_wdt_config_t cfg = {
+        .timeout_ms = ADSB_TASK_WDT_MS,
+        .idle_core_mask = 0,
+        .trigger_panic = true,
+    };
+    esp_err_t err = esp_task_wdt_reconfigure(&cfg);
+    if (err == ESP_ERR_INVALID_STATE) err = esp_task_wdt_init(&cfg);   // TWDT not started by the core
+    if (err == ESP_OK) err = esp_task_wdt_add(nullptr);
+    Serial.printf("[adsb] task watchdog %lus: %s\n", (unsigned long)(ADSB_TASK_WDT_MS / 1000), esp_err_to_name(err));
+}
+#endif
+
 static void adsb_task(void*) {
     std::vector<Aircraft> fresh;
     AircraftSnapshotGate snapshotGate;
@@ -137,7 +187,13 @@ static void adsb_task(void*) {
     uint32_t nextWxRadarAt = UINT32_MAX;
     uint32_t nextCloudImageAt = UINT32_MAX;
     FeedWatchdog watchdog(millis());         // self-heal: see feed_watchdog.h
+#if CONFIG_ESP_HOSTED_ENABLED
+    adsb_task_watchdog_begin();
+#endif
     for (;;) {
+#if CONFIG_ESP_HOSTED_ENABLED
+        esp_task_wdt_reset();                    // one full pass = alive (see ADSB_TASK_WDT_MS)
+#endif
         const bool conn = (WiFi.status() == WL_CONNECTED);
         if (conn && !wasConnected) {
             // disable WiFi modem power-save: on a mains-powered desk gadget it just adds latency
@@ -805,6 +861,10 @@ static void handleSave() {
     ESP.restart();
 }
 
+#if CONFIG_ESP_HOSTED_ENABLED
+static void hosted_wifi_forget();   // defined with wifi_prefer_strongest_ap()
+#endif
+
 static void handleWifi() {
     if (refuseIfCrossSite()) return;
     g_web.send(200, "text/html",
@@ -824,6 +884,9 @@ static void handleWifi() {
         nvs_commit(h);
         nvs_close(h);
     }
+#if CONFIG_ESP_HOSTED_ENABLED
+    hosted_wifi_forget();           // our own copy (ESP-Hosted boards), or it comes back at boot
+#endif
     delay(300);                     // let NVS finish committing before the reboot
     ESP.restart();
 }
@@ -1184,13 +1247,57 @@ static void handleUpdateUpload() {
 // setScanMethod/setSortMethod only apply when new credentials are entered (WiFi.begin(ssid,
 // pass)). Reconnecting with SAVED credentials (WiFiManager's autoConnect, our background
 // retry, the driver's auto-reconnect) reuses the stored driver config, so patch that too.
+#if CONFIG_ESP_HOSTED_ENABLED
+// With ESP-Hosted (the P4's WiFi is an ESP32-C6 over SDIO) the Arduino core forces the
+// WiFi driver's storage to RAM (WiFiGeneric.cpp: "required for proper work when esp-hosted
+// is used"), so credentials saved by the portal are gone after a reboot. Keep our own copy
+// in NVS and hand it back to the driver at boot (wifi_prefer_strongest_ap).
+static constexpr const char *HOSTED_WIFI_NS = "capwifi";
+
+static void hosted_wifi_store(const String &ssid, const String &pass) {
+    if (ssid.isEmpty()) return;
+    Preferences p;
+    p.begin(HOSTED_WIFI_NS, false);
+    p.putString("ssid", ssid);
+    p.putString("pass", pass);
+    p.end();
+    Serial.printf("[wifi] credentials for '%s' kept in NVS (ESP-Hosted keeps them in RAM only)\n", ssid.c_str());
+}
+
+static void hosted_wifi_forget() {
+    Preferences p;
+    p.begin(HOSTED_WIFI_NS, false);
+    p.clear();
+    p.end();
+}
+
+// Fills an empty station config from our NVS copy. True if it changed conf.
+static bool hosted_wifi_restore(wifi_config_t &conf) {
+    if (conf.sta.ssid[0]) return false;               // the driver already has a network
+    Preferences p;
+    if (!p.begin(HOSTED_WIFI_NS, true)) return false; // namespace absent: nothing saved yet
+    const String ssid = p.getString("ssid", "");
+    const String pass = p.getString("pass", "");
+    p.end();
+    if (ssid.isEmpty()) return false;
+    strlcpy((char *)conf.sta.ssid, ssid.c_str(), sizeof(conf.sta.ssid));
+    strlcpy((char *)conf.sta.password, pass.c_str(), sizeof(conf.sta.password));
+    Serial.printf("[wifi] restored saved network '%s' from NVS\n", ssid.c_str());
+    return true;
+}
+#endif
+
 static void wifi_prefer_strongest_ap() {
     WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
     WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
     if (!WiFi.mode(WIFI_STA)) return;             // the driver must be up to read its config
     wifi_config_t conf;
     if (esp_wifi_get_config(WIFI_IF_STA, &conf) != ESP_OK) return;
-    if (conf.sta.scan_method == WIFI_ALL_CHANNEL_SCAN &&
+    bool changed = false;
+#if CONFIG_ESP_HOSTED_ENABLED
+    changed = hosted_wifi_restore(conf);          // before autoConnect, so it sees a saved network
+#endif
+    if (!changed && conf.sta.scan_method == WIFI_ALL_CHANNEL_SCAN &&
         conf.sta.sort_method == WIFI_CONNECT_AP_BY_SIGNAL) return;   // already set: no flash write
     conf.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
     conf.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
@@ -1322,6 +1429,9 @@ void setup() {
     // own port-80 server (and mDNS) don't cleanly hand over to our web server / STA
     // interface in non-blocking mode, so the config page is flaky until a fresh boot.
     g_wm.setSaveConfigCallback([]() {
+#if CONFIG_ESP_HOSTED_ENABLED
+        hosted_wifi_store(g_wm.getWiFiSSID(), g_wm.getWiFiPass());   // survives the reboot below
+#endif
         Serial.println("[wifi] new credentials saved -> rebooting for a clean web/mDNS start");
         g_rebootAtMs = millis() + 2500;   // let the portal deliver its 'saved' page first
     });
@@ -1343,6 +1453,10 @@ void setup() {
     cloud_image_begin();
     g_ac_mutex = xSemaphoreCreateMutex();
     xTaskCreatePinnedToCore(adsb_task, "adsb", ADSB_TASK_STACK_BYTES, nullptr, 1, nullptr, 0);  // TLS needs a big stack
+#if CONFIG_ESP_HOSTED_ENABLED
+    // priority 2: a busy ADS-B task (priority 1, same core) can't starve the C6 check
+    xTaskCreatePinnedToCore(hosted_probe_task, "c6probe", HOSTED_PROBE_STACK_BYTES, nullptr, 2, nullptr, 0);
+#endif
 
     // configuration web page (http://capsuleradar.local/)
     g_web.on("/", handleRoot);
@@ -1435,10 +1549,15 @@ void loop() {
         if (WiFi.status() == WL_CONNECTED) {
             Serial.println("[wifi] saved network appeared -> restarting for a clean start");
             g_rebootAtMs = millis() + 800;
-        } else if (millis() - lastRetry > 20000UL && g_wm.getWiFiIsSaved()) {
+        } else if (millis() - lastRetry > 20000UL) {
+            // Stamp before asking: with nothing saved, getWiFiIsSaved() is false every time,
+            // and it used to run on every loop pass. It reads the driver config, which on
+            // ESP-Hosted boards is a round trip to the C6 (~65 a second, for nothing).
             lastRetry = millis();
-            Serial.println("[wifi] retrying saved network in the background...");
-            WiFi.begin();                     // uses the stored credentials
+            if (g_wm.getWiFiIsSaved()) {
+                Serial.println("[wifi] retrying saved network in the background...");
+                WiFi.begin();                 // uses the stored credentials
+            }
         }
     }
 
@@ -1486,9 +1605,10 @@ void loop() {
         const uint32_t fr = display_frames();
         const unsigned fps = (fr - lastFrames) / 5;
         lastFrames = fr;
-        Serial.printf("[mem] heap %u (min %u, biggest %u) | psram %u free | up %lus | aircraft %d | fps %u\n",
+        Serial.printf("[mem] heap %u (min %u, biggest %u, dma %u) | psram %u free | up %lus | aircraft %d | fps %u\n",
                       (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
                       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
                       (unsigned)ESP.getFreePsram(), (unsigned long)(millis() / 1000),
                       (int)g_snap.size(), fps);
 #endif
