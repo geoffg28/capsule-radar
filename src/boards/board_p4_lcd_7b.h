@@ -66,8 +66,15 @@
 #define TOUCH_DRIVER_GT911  1
 #define I2C_ADDR_TOUCH      0x5D
 #define I2C_ADDR_TOUCH_ALT  0x14
-#define TP_MIRROR_X         false          // adjust on hardware if X is flipped
-#define TP_MIRROR_Y         false          // adjust on hardware if Y is flipped
+// The GT911 reports from the opposite corner to the panel's pixel (0,0): Waveshare's own
+// driver for this board (gt911.cpp, "Match the LCD-7B BSP's native 1024x600 GT911
+// orientation") runs the panel at rotation 0 with mirror_x = mirror_y = 1. Without both
+// mirrors every tap lands at the point reflected through the screen centre.
+#define TP_MIRROR_X         true
+#define TP_MIRROR_Y         true
+// Bring-up aid: print every press/lift (raw and mapped coordinates) and repeated I2C read
+// failures on serial. Set to 0 once touch is confirmed on hardware.
+#define TOUCH_LOG_EDGES     1
 
 // ---------- Peripherals ----------
 #define BOARD_HAS_PMIC      0
