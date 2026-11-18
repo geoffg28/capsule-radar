@@ -17,6 +17,15 @@ The boot log states which board the image was built for:
 black, check that line first — the boards' pin maps are completely different, so the
 wrong image drives the wrong GPIOs and shows nothing.
 
+**ESP32-P4-WIFI6-Touch-LCD-7B (7" landscape):** connect the **UART** USB-C port (the native
+one flashes but shows no log), and update the on-board ESP32-C6's WiFi firmware once before
+the first flash of the radar, or the WiFi setup page hangs:
+```
+pio run -e esp32-p4-c6-update -t upload   # then type UPDATE in the serial monitor
+pio run -e esp32-p4-lcd-7b -t upload
+```
+Full steps and why in [HARDWARE.md](HARDWARE.md#the-esp32-c6-needs-its-firmware-updated-first).
+
 ## Bringing up a new board
 Pins for the two supported boards are already confirmed and live in `src/boards/`; you
 only need this if you are porting to a third board. See "Adding another board" in

@@ -84,7 +84,7 @@ full-panel rim-ring test card one pixel at a time until it centred.
 
 ---
 
-## ESP32-P4-WIFI6-Touch-LCD-7B (7" landscape, not yet confirmed on hardware)
+## ESP32-P4-WIFI6-Touch-LCD-7B (7" landscape, running on hardware)
 Build with `-e esp32-p4-lcd-7b`; preview the layout on the desktop with `-e native-p4-7b`.
 Pin map: `src/boards/board_p4_lcd_7b.h`.
 
@@ -97,14 +97,61 @@ it). It needs Arduino core 3.3.x, so its env pins a newer pioarduino platform.
 | Panel | EK79007, 1024x600 IPS, 2-lane MIPI-DSI at 1000 Mbit/s per lane, 52 MHz pixel clock. Reset GPIO33. |
 | Backlight | LEDC PWM on GPIO32, 5 kHz, 10-bit, **active low** |
 | I2C | SDA GPIO7, SCL GPIO8 (touch, ES8311 `0x18`, ES7210 `0x40`) |
-| Touch | GT911 at `0x5D` or `0x14` (both probed), polled; INT and RST are not wired to GPIOs in the vendor example |
+| Touch | GT911 at `0x5D` on the board tested (`0x14` is probed too), polled; INT and RST are not wired to GPIOs in the vendor example. X and Y are mirrored relative to the panel (`TP_MIRROR_X/Y`). |
+| WiFi | ESP32-C6 over SDIO (CLK 18, CMD 19, D0-D3 14-17, C6 reset 54), from the Arduino core's `esp32p4` variant |
 | Audio | ES8311 + speaker (MCLK 13, BCLK 12, LRCK 10, DOUT 9, amp enable 53), ES7210 mics (DIN 11). Compiled out for now (`BOARD_HAS_AUDIO 0`). |
-| Not fitted | PMIC, IMU, I2C RTC |
+| Not fitted | PMIC, IMU, I2C RTC (their probes at boot find nothing, as expected) |
 
-Everything in that table is lifted from Waveshare's Arduino examples for the board
-(`examples/arduino` in github.com/waveshareteam/ESP32-P4-WIFI6-Touch-LCD-7B). **None of it
-has been confirmed on a real board yet**: do the I2C scan and a full-panel test pattern
-before trusting it, then delete the warning at the top of the board header.
+The pins come from Waveshare's Arduino examples for the board (`examples/arduino` in
+github.com/waveshareteam/ESP32-P4-WIFI6-Touch-LCD-7B). Confirmed on a real board
+(chip rev v3.x, November 2026): panel image, orientation and colours, GT911 touch, the SDIO
+link to the C6 (WiFi setup portal, scan, joining a network, the live feed). **Not yet
+exercised: the audio pins**, since audio is compiled out.
+
+Serial: use the board's **UART** USB-C port (CH343). The build sends `Serial` to UART0, so the
+native USB port (Espressif USB-Serial/JTAG) can flash but shows no log.
+
+### The ESP32-C6 needs its firmware updated first
+The C6 runs ESP-Hosted firmware that has to match the host side compiled into the Arduino
+core (ESP-Hosted 2.12.x in core 3.3.x). The boards ship with older C6 firmware. Symptoms:
+
+- `rpc_core: Response not received for [0x15e](Req_GetCoprocessorFwVersion)` on every boot;
+- the setup hotspot starts, but **Configure WiFi** (a scan) hangs the C6, the display freezes
+  and the board restarts a minute or so later.
+
+Fix once per board, over the UART port, with the one-off env in `tools/c6_update/`
+(it flashes the C6 image bundled in the core over the SDIO link; no internet needed):
+
+```
+pio run -e esp32-p4-c6-update -t upload --upload-port COMx
+pio device monitor -b 115200 -p COMx      # type UPDATE when it says READY
+pio run -e esp32-p4-lcd-7b -t upload --upload-port COMx
+```
+
+Details and the fallback (flashing the C6 through its own port) in `tools/c6_update/README.md`.
+
+### ESP-Hosted quirks the firmware works around
+- **Internal DMA RAM is the WiFi budget.** Every byte from the C6 lands in DMA-capable
+  internal RAM. A 120 KB internal LVGL draw buffer once left ~3 KB of it, the scan reply could
+  not be received, and the link wedged. The draw buffer lives in PSRAM; keep large buffers
+  out of internal RAM on this board. `-DDEBUG_MEM=1` prints free DMA RAM every 5 s
+  (about 85-90 KB with WiFi connected).
+- **The WiFi driver can't keep credentials.** With ESP-Hosted the Arduino core forces its
+  storage to RAM, so the radar keeps the SSID and password in its own NVS namespace
+  (`capwifi`), restores them at boot, and erases them on Reset WiFi.
+- **A hung C6 used to freeze the UI**, since every WiFi call from the loop waits out a 5 s
+  RPC timeout, and ESP-Hosted's `rpc_wifi_ap_get_sta_list` dereferences NULL when the
+  reply never comes. WiFiManager's debug output (which makes that call) is compiled out on
+  this env (`WM_NODEBUG`); a small task probes the C6 every 15 s and restarts the board
+  after two unanswered checks; the ADS-B task is on a 120 s task watchdog. A C6 that resets
+  outright is handled by ESP-Hosted itself, which restarts the P4.
+
+### Building next to the S3 boards
+The S3 envs and this one pin different platform versions, but PlatformIO keeps a single
+`framework-arduinoespressif32` package. Building one family replaces the core the other
+needs, so the next build of the other family reinstalls it (slow), and **an S3 build and a
+P4 build must not run at the same time** on one machine: the swap pulls files out from under
+the build in progress.
 
 Layout: the panel is split instead of round. `SCREEN_W/H` (683x600) is the radar pane on
 the left two thirds, where the shared UI lays itself out exactly as on the round boards;
