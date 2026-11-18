@@ -27,8 +27,9 @@ pio run -e esp32-p4-lcd-7b -t upload
 Full steps and why in [HARDWARE.md](HARDWARE.md#the-esp32-c6-needs-its-firmware-updated-first).
 
 ## Bringing up a new board
-Pins for the two supported boards are already confirmed and live in `src/boards/`; you
-only need this if you are porting to a third board. See "Adding another board" in
+Pins for the supported boards (the 1.75, 1.43, the experimental LCD 2.1 and P4 7B) are already
+confirmed and live in `src/boards/`; you only need this if you are porting to a new board.
+See "Adding another board" in
 [HARDWARE.md](HARDWARE.md).
 
 1. Take the pins from the vendor's factory Arduino demos (`01_HelloWorld` gives the QSPI

@@ -92,6 +92,38 @@ so its first build takes longer than the AMOLED environments. Since 1.8.0 it use
 same sweep compositor as the AMOLED boards, with partial refresh at 0/90/180/270 degrees
 (#60): the sweep turns smoothly and quick taps register first time.
 
+### Waveshare ESP32-P4-WIFI6-Touch-LCD-7B (experimental)
+
+**Experimental:** the panel, touch, WiFi setup, the feed and the web page work on a real
+board; audio is compiled out for now. A different SoC from the boards above: an **ESP32-P4**
+with a 7″ **1024×600 EK79007** IPS panel over MIPI-DSI, **GT911** touch, and an on-board
+**ESP32-C6** for WiFi (ESP-Hosted over SDIO). No PMIC, IMU or RTC, so no battery readout,
+face-down sleep or offline clock.
+
+The screen is landscape, so the layout is split instead of round: the radar sits in the left
+two thirds and the aircraft list stays docked in the right third. Its pin map lives in
+`src/boards/board_p4_lcd_7b.h`.
+
+**Update the C6 first.** These boards ship with ESP32-C6 WiFi firmware that is too old for
+this firmware: the setup hotspot appears, but *Configure WiFi* hangs and the board restarts.
+Flash the updater once per board, then the radar:
+
+```bash
+pio run -e esp32-p4-c6-update -t upload       # then open the serial monitor and type UPDATE
+pio run -e esp32-p4-lcd-7b -t upload
+```
+
+Use the board's **UART** USB-C port: the radar logs there, while the native USB port flashes
+but shows nothing. Once connected to WiFi, `pio run -e esp32-p4-lcd-7b-ota -t upload` updates
+it over the air. Details, and what the firmware works around on ESP-Hosted, are in
+[`docs/HARDWARE.md`](docs/HARDWARE.md#esp32-p4-wifi6-touch-lcd-7b-7-landscape-running-on-hardware).
+
+The P4 environment uses a newer pioarduino platform (Arduino core 3.3.x) than the S3 boards.
+PlatformIO keeps one copy of the Arduino core, so switching between a P4 and an S3 build
+reinstalls it (slow), and the two must not build at the same time on one machine.
+CI builds an app-only `CapsuleRadar-ota-p4lcd7b.bin` (for the device's web update page);
+there is no release asset or browser-flasher image for it yet.
+
 ### Where to buy the board
 
 The 1.75″ board is in a **global stock squeeze** right now (even Waveshare lists it on backorder), so availability moves week to week. The official store is the reference; the Amazon links are what is actually in stock as of this writing.
@@ -140,6 +172,7 @@ python3 -m http.server -d web/flash 8000           # serve (Web Serial works on 
 The whole UI is portable LVGL and runs on your computer (SDL2) — great for iterating without hardware:
 ```bash
 pio run -e native -t exec     # opens a 466×466 window (needs SDL2: `brew install sdl2`)
+pio run -e native-p4-7b -t exec   # the 1024×600 split layout of the P4 7″ board
 ```
 Mouse = touch · `T` = switch theme · close the window to quit.
 
