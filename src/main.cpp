@@ -40,7 +40,8 @@
 #include <esp_wifi.h>               // WiFi driver control (reset must survive the reboot)
 #include <nvs.h>                    // erase the driver's "nvs.net80211" namespace (WiFi reset)
 #if CONFIG_ESP_HOSTED_ENABLED
-#include "esp32-hal-hosted.h"       // C6 co-processor liveness (hosted_probe)
+#include "esp32-hal-hosted.h"       // C6 co-processor liveness (hosted_probe_task)
+#include <esp_task_wdt.h>           // ADS-B task watchdog
 #endif
 #include <mbedtls/platform.h>       // route mbedTLS allocations to PSRAM
 
@@ -131,48 +132,48 @@ static const int TZOPTS_N = sizeof(TZOPTS) / sizeof(TZOPTS[0]);
 
 // ---- networking task (core 0): fetch + parse, never touches the display ----
 #if CONFIG_ESP_HOSTED_ENABLED
-// Liveness check for the WiFi co-processor (see HOSTED_PROBE_* in config.h). Runs on the
-// ADS-B task, never the UI loop. A hung C6 otherwise freezes the UI for good: every WiFi
-// call from loop() (WiFiManager, the reconnect retry) waits out a 5 s RPC timeout.
-static void hosted_probe() {
-    static uint32_t lastProbe = 0;
-    static int fails = 0;
-    if (!hostedIsInitialized() || millis() - lastProbe < HOSTED_PROBE_INTERVAL_MS) return;
-    lastProbe = millis();
-#ifdef C6_HANG_TEST_MS
-    // Test hook (build with -DC6_HANG_TEST_MS=60000): recreate the real hang once - starve
-    // internal DMA RAM to ~3 KB (what the old internal LVGL draw buffer did) and start a
-    // scan, whose large reply then can't be received. (Holding the C6 in reset is not the
-    // same: ESP-Hosted sees the link drop and restarts the P4 itself.)
-    static bool hung = false;
-    if (!hung && millis() > C6_HANG_TEST_MS) {
-        hung = true;
-        size_t grabbed = 0;
-        while (heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA) > 3072) {
-            if (!heap_caps_malloc(1024, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA)) break;  // leaked on purpose
-            grabbed += 1024;
+// Liveness check for the WiFi co-processor (see HOSTED_PROBE_* in config.h). A task of its
+// own: not the UI loop, and not the ADS-B task, which blocks inside fetches and would take
+// the check down with it. A hung C6 otherwise freezes the UI for good: every WiFi call from
+// loop() (WiFiManager, the reconnect retry) waits out a 5 s RPC timeout.
+static void hosted_probe_task(void *) {
+    int fails = 0;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(HOSTED_PROBE_INTERVAL_MS));
+        if (!hostedIsInitialized()) continue;
+        wifi_mode_t mode;
+        const uint32_t t0 = millis();
+        const esp_err_t err = esp_wifi_get_mode(&mode);
+        const uint32_t took = millis() - t0;
+        if (err == ESP_OK && took < HOSTED_PROBE_SLOW_MS) {
+            fails = 0;
+            continue;
         }
-        Serial.printf("[wifi] TEST: took %u bytes of DMA RAM (%u left), starting a scan\n", (unsigned)grabbed,
-                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
-        WiFi.scanNetworks(true);
-        lastProbe = millis() - HOSTED_PROBE_INTERVAL_MS + 5000;   // first probe 5 s after the scan
-        return;
+        fails++;
+        Serial.printf("[wifi] C6 co-processor not answering (%s, %lu ms) - %d/%d\n",
+                      esp_err_to_name(err), (unsigned long)took, fails, HOSTED_PROBE_MAX_FAILS);
+        if (fails >= HOSTED_PROBE_MAX_FAILS) {
+            Serial.println("[wifi] C6 hung -> restarting (also resets the C6)");
+            Serial.flush();
+            vTaskDelay(pdMS_TO_TICKS(100));
+            ESP.restart();
+        }
     }
-#endif
-    wifi_mode_t mode;
-    const uint32_t t0 = millis();
-    const esp_err_t err = esp_wifi_get_mode(&mode);
-    const uint32_t took = millis() - t0;
-    if (err == ESP_OK && took < HOSTED_PROBE_SLOW_MS) { fails = 0; return; }
-    fails++;
-    Serial.printf("[wifi] C6 co-processor not answering (%s, %lu ms) - %d/%d\n",
-                  esp_err_to_name(err), (unsigned long)took, fails, HOSTED_PROBE_MAX_FAILS);
-    if (fails >= HOSTED_PROBE_MAX_FAILS) {
-        Serial.println("[wifi] C6 hung -> restarting (also resets the C6)");
-        Serial.flush();
-        delay(100);
-        ESP.restart();
-    }
+}
+
+// Put the calling task (the ADS-B task) on the ESP-IDF task watchdog with a limit of
+// ADSB_TASK_WDT_MS. The TWDT config is global: this also stops it watching the idle tasks
+// (idle_core_mask 0), which a 120 s limit would make meaningless anyway.
+static void adsb_task_watchdog_begin() {
+    esp_task_wdt_config_t cfg = {
+        .timeout_ms = ADSB_TASK_WDT_MS,
+        .idle_core_mask = 0,
+        .trigger_panic = true,
+    };
+    esp_err_t err = esp_task_wdt_reconfigure(&cfg);
+    if (err == ESP_ERR_INVALID_STATE) err = esp_task_wdt_init(&cfg);   // TWDT not started by the core
+    if (err == ESP_OK) err = esp_task_wdt_add(nullptr);
+    Serial.printf("[adsb] task watchdog %lus: %s\n", (unsigned long)(ADSB_TASK_WDT_MS / 1000), esp_err_to_name(err));
 }
 #endif
 
@@ -186,9 +187,12 @@ static void adsb_task(void*) {
     uint32_t nextWxRadarAt = UINT32_MAX;
     uint32_t nextCloudImageAt = UINT32_MAX;
     FeedWatchdog watchdog(millis());         // self-heal: see feed_watchdog.h
+#if CONFIG_ESP_HOSTED_ENABLED
+    adsb_task_watchdog_begin();
+#endif
     for (;;) {
 #if CONFIG_ESP_HOSTED_ENABLED
-        hosted_probe();
+        esp_task_wdt_reset();                    // one full pass = alive (see ADSB_TASK_WDT_MS)
 #endif
         const bool conn = (WiFi.status() == WL_CONNECTED);
         if (conn && !wasConnected) {
@@ -1449,6 +1453,10 @@ void setup() {
     cloud_image_begin();
     g_ac_mutex = xSemaphoreCreateMutex();
     xTaskCreatePinnedToCore(adsb_task, "adsb", ADSB_TASK_STACK_BYTES, nullptr, 1, nullptr, 0);  // TLS needs a big stack
+#if CONFIG_ESP_HOSTED_ENABLED
+    // priority 2: a busy ADS-B task (priority 1, same core) can't starve the C6 check
+    xTaskCreatePinnedToCore(hosted_probe_task, "c6probe", HOSTED_PROBE_STACK_BYTES, nullptr, 2, nullptr, 0);
+#endif
 
     // configuration web page (http://capsuleradar.local/)
     g_web.on("/", handleRoot);
