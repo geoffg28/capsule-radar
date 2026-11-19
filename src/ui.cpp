@@ -571,7 +571,12 @@ static void build_list(void) {
         lv_style_set_text_color(&s_rowEmgStyle, UI_EMERG);
         s_rowStylesInit = true;
     }
-    const int n = radar::count();
+    // Only what is inside the outer ring, like the scope and the HUD count: the feed is
+    // queried wider than the display (ADSB_QUERY_MULT) for the edge arrows, and listing those
+    // put aircraft on the list that the radar showed as out of range. The snapshot is sorted
+    // nearest first, so the in-range aircraft are its first countInRange() entries, and row i
+    // still shows radar::info(i) (list_press_cb relies on that).
+    const int n = radar::countInRange();
     for (int i = 0; i < n; ++i) {
         AcInfo in;
         radar::info(i, in);
