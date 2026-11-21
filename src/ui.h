@@ -3,10 +3,14 @@
 // M3 UI: swipeable views (radar / list / stats) + tap-to-inspect detail card.
 // Pure LVGL, portable (device + SDL simulator). Builds on top of radar_view.
 void ui_create(void);            // build the whole UI on the active screen
+void ui_frame_done(void);       // the display driver finished sending a full frame
 bool ui_sweep_visible(void);     // radar tile shown and not mid-swipe (sweep compositor)
 int  ui_sweep_masks(int16_t out[][5], int max);   // logical x1,y1,x2,y2,radius: rounded boxes the sweep must not paint over
 void ui_on_data_updated(void);   // refresh card/list/stats after radar::update()
 void ui_show_view(int idx);      // 0 = radar, 1 = list, 2 = stats, 3 = weather
+void ui_bench_page(int idx);     // GET /perf?bench=1: animated change to page idx (like the end of a swipe)
+bool ui_bench_moving(void);      // ...the tileview is still scrolling or animating
+int  ui_bench_view(void);        // ...the page on screen (0..3)
 void ui_set_view_changed_cb(void (*cb)(int idx));  // fired on swipe — lets main remember the last view
 void ui_set_status(bool wifiUp, bool feedOk, int rssi, const char *clock);  // HUD: signal bars (count=RSSI, colour: red=down, amber=stale feed, white=ok) + clock
 void ui_set_battery(int pct, bool charging, bool present);  // top HUD battery indicator
@@ -16,6 +20,7 @@ void ui_set_feed_source(const char *host);  // Stats "Feed" line: which ADS-B pr
 void ui_set_gps(int state, int sats, float altM);   // GPS indicator: state 0=off/hidden 1=acquiring 2=fix; HUD icon + Stats line (altM = GPS altitude, NAN if unknown)
 void ui_splash_show(void);  // branded boot splash (auto-fades, covers init time)
 void ui_set_range_cb(void (*cb)(float km));  // on-screen zoom button -> notify main
+void ui_apply_theme(void);                   // retint the radar tile's range button to the active theme
 void ui_set_range_km(float km);              // update the zoom button label / sync the cycle
 void ui_set_units(int preset);               // 0 = Aviation (ft,kt,km) · 1 = Metric (m,km/h,km) · 2 = Imperial (ft,mph,mi)
 void ui_set_temp_unit(int t);                // weather temperature: 0 = follow Units · 1 = °C · 2 = °F
