@@ -20,6 +20,7 @@
 #include "display.h"
 #include "radar_view.h"
 #include "ui.h"
+#include "perf.h"
 #include "touch.h"
 #include "touch_queue.h"
 
@@ -81,6 +82,7 @@ static void touch_sample(bool force);
 
 static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) {
     touch_sample(false);   // keep sampling the finger between the strips of a long frame
+    perf::Scope t(perf::PUSH);
     const int16_t w = (int16_t)(area->x2 - area->x1 + 1);
     const int16_t h = (int16_t)(area->y2 - area->y1 + 1);
 #if (LV_COLOR_16_SWAP != 0)
@@ -88,8 +90,14 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) 
 #else
     s_gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)px, w, h);
 #endif
-    if (lv_disp_flush_is_last(drv)) s_frameCount = s_frameCount + 1;
+    if (lv_disp_flush_is_last(drv)) { s_frameCount = s_frameCount + 1; ui_frame_done(); }
     lv_disp_flush_ready(drv);
+}
+
+// LVGL monitor_cb: one screen refresh done (GET /perf).
+static void monitor_cb(lv_disp_drv_t *drv, uint32_t ms, uint32_t px) {
+    (void)drv;
+    perf::refresh(ms, px);
 }
 
 // --- touch: GT911 -> LVGL pointer, through TouchQueue (see touch_queue.h) -----------
@@ -102,6 +110,7 @@ static void touch_sample(bool force) {
     if (!s_touchOk) return;
     const uint32_t now = millis();
     if (!force && now - s_touchLastMs < TOUCH_SAMPLE_MS) return;
+    if (s_touchLastMs) perf::add(perf::TOUCH_GAP, (now - s_touchLastMs) * 1000);
     s_touchLastMs = now;
     uint16_t x, y;
     switch (touch_read(&x, &y)) {
@@ -162,6 +171,7 @@ bool begin() {
     s_disp_drv.hor_res  = PANEL_W;
     s_disp_drv.ver_res  = PANEL_H;
     s_disp_drv.flush_cb = flush_cb;
+    s_disp_drv.monitor_cb = monitor_cb;   // GET /perf: refresh timing
     s_disp_drv.draw_buf = &s_draw_buf;
     lv_disp_drv_register(&s_disp_drv);
     s_ready = true;
@@ -182,7 +192,9 @@ bool begin() {
 }
 
 void loop() {
-    if (s_ready) lv_timer_handler();
+    if (!s_ready) return;
+    perf::Scope t(perf::LVGL);
+    lv_timer_handler();
 }
 
 // No per-pixel compositor on this board: LVGL draws the sweep (radar_view.cpp).
