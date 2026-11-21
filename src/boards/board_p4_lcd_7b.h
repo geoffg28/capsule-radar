@@ -11,9 +11,10 @@
 //  github.com/waveshareteam/ESP32-P4-WIFI6-Touch-LCD-7B: libraries/displays/displays_config.h,
 //  i2c.h, gt911.h and 09_Audio_Playback), not guessed.
 //
-//  Booted on a real board (chip rev v3.x, November 2026): panel, backlight, GT911 touch and
-//  the SDIO link to the C6 are confirmed. The audio pins are NOT yet exercised (audio is
-//  compiled out). The C6 needs its ESP-Hosted firmware updated once per board first:
+//  Booted on a real board (chip rev v3.x, November 2026): panel, backlight, GT911 touch,
+//  the SDIO link to the C6 and the ES8311 speaker (every alert sound and the self-test
+//  tone) are confirmed; the ES7210 mics are unused. The C6 needs its ESP-Hosted firmware
+//  updated once per board first:
 //  see docs/HARDWARE.md and tools/c6_update/.
 // ---------------------------------------------------------------------------
 
@@ -78,10 +79,9 @@
 
 // ---------- Peripherals ----------
 #define BOARD_HAS_PMIC      0
-// The ES8311 + speaker ARE fitted, but audio stays off for the first bring-up: audio.cpp's
-// init was tuned on the 1.75 and has never run on a P4. Flip to 1 once the board boots and
-// the pins below are confirmed.
-#define BOARD_HAS_AUDIO     0
+// ES8311 + speaker (NS4150B amp on PIN_AUDIO_PA). audio.cpp's init clocks the codec from
+// BCLK, so no MCLK tuning is board-specific; the I2C bus is already up (touch_gt911.cpp).
+#define BOARD_HAS_AUDIO     1
 #define I2C_ADDR_CODEC      0x18           // ES8311
 #define I2C_ADDR_MIC_ADC    0x40           // ES7210
 #define PIN_I2S_MCLK        13

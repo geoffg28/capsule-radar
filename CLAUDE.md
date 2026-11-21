@@ -35,10 +35,11 @@ porting there. Build with `-e esp32-s3-lcd-21`: `custom_sdkconfig` rebuilds ESP-
 first build is slow. The sideways shift (#49) was fixed in #54 (bounce buffers + page flip);
 after changing `custom_sdkconfig`, delete `sdkconfig.esp32-s3-lcd-21` or the old values stick.
 
-### Fourth board (running on hardware, audio untested): ESP32-P4-WIFI6-Touch-LCD-7B
+### Fourth board (running on hardware): ESP32-P4-WIFI6-Touch-LCD-7B
 A 7" 1024x600 landscape IPS (EK79007, MIPI-DSI) on an **ESP32-P4**, GT911 touch, WiFi through
 an on-board ESP32-C6 (esp-hosted). Pins in `src/boards/board_p4_lcd_7b.h`, from Waveshare's
-Arduino examples; panel, touch and WiFi are confirmed on a real board, the audio pins are not.
+Arduino examples; panel, touch, WiFi and the ES8311 speaker are confirmed on a real board
+(the ES7210 mics are unused).
 Display glue is `src/display_dsi_ek79007.cpp` (a third copy of the `display::` API: no sweep
 compositor, rotation 0/180 only), touch is `src/touch_gt911.cpp`. Build with
 `-e esp32-p4-lcd-7b` (newer pioarduino platform, Arduino core 3.3.x).
