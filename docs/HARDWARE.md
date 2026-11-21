@@ -99,14 +99,14 @@ it). It needs Arduino core 3.3.x, so its env pins a newer pioarduino platform.
 | I2C | SDA GPIO7, SCL GPIO8 (touch, ES8311 `0x18`, ES7210 `0x40`) |
 | Touch | GT911 at `0x5D` on the board tested (`0x14` is probed too), polled; INT and RST are not wired to GPIOs in the vendor example. X and Y are mirrored relative to the panel (`TP_MIRROR_X/Y`). |
 | WiFi | ESP32-C6 over SDIO (CLK 18, CMD 19, D0-D3 14-17, C6 reset 54), from the Arduino core's `esp32p4` variant |
-| Audio | ES8311 + speaker (MCLK 13, BCLK 12, LRCK 10, DOUT 9, amp enable 53), ES7210 mics (DIN 11). Compiled out for now (`BOARD_HAS_AUDIO 0`). |
+| Audio | ES8311 + speaker (MCLK 13, BCLK 12, LRCK 10, DOUT 9, amp enable 53), ES7210 mics (DIN 11, unused). Speaker confirmed: alert pings play (`BOARD_HAS_AUDIO 1`). |
 | Not fitted | PMIC, IMU, I2C RTC (their probes at boot find nothing, as expected) |
 
 The pins come from Waveshare's Arduino examples for the board (`examples/arduino` in
 github.com/waveshareteam/ESP32-P4-WIFI6-Touch-LCD-7B). Confirmed on a real board
 (chip rev v3.x, November 2026): panel image, orientation and colours, GT911 touch, the SDIO
-link to the C6 (WiFi setup portal, scan, joining a network, the live feed). **Not yet
-exercised: the audio pins**, since audio is compiled out.
+link to the C6 (WiFi setup portal, scan, joining a network, the live feed), and the ES8311
+speaker (all alert sounds and the self-test tone). The ES7210 mics are not used.
 
 Serial: use the board's **UART** USB-C port (CH343). The build sends `Serial` to UART0, so the
 native USB port (Espressif USB-Serial/JTAG) can flash but shows no log.

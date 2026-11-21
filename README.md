@@ -95,7 +95,7 @@ same sweep compositor as the AMOLED boards, with partial refresh at 0/90/180/270
 ### Waveshare ESP32-P4-WIFI6-Touch-LCD-7B (experimental)
 
 **Experimental:** the panel, touch, WiFi setup, the feed and the web page work on a real
-board; audio is compiled out for now. A different SoC from the boards above: an **ESP32-P4**
+board, and so do the alert pings on its speaker. A different SoC from the boards above: an **ESP32-P4**
 with a 7″ **1024×600 EK79007** IPS panel over MIPI-DSI, **GT911** touch, and an on-board
 **ESP32-C6** for WiFi (ESP-Hosted over SDIO). No PMIC, IMU or RTC, so no battery readout,
 face-down sleep or offline clock.
