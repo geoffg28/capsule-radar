@@ -76,6 +76,7 @@ static bool                  g_showSweep = true;                     // rotating
 static int                   g_units = 0;                            // 0=Aviation 1=Metric 2=Imperial (web/NVS)
 static int                   g_tempUnit = 0;                         // weather temp: 0=follow Units 1=°C 2=°F (web/NVS)
 static bool                  g_showAirports = true;                  // airport markers on/off (web/NVS)
+static int                   g_aptLabelNm = AIRPORT_LABEL_UNTOWERED_NM_DEFAULT; // non-towered names up to this range, NM (web/NVS)
 static bool                  g_hideGround   = false;                 // skip on-ground aircraft in the feed (web/NVS)
 static int                   g_minAltFt     = 0;                     // only show aircraft above this altitude, ft (0 = off) (web/NVS)
 static int                   g_maxAltFt     = 0;                     // only show aircraft below this altitude, ft (0 = off) (web/NVS)
@@ -663,6 +664,17 @@ static void handleRoot() {
         snprintf(o, sizeof(o), "<option value=%d%s>%d</option>", mv, mv == g_maxAc ? " selected" : "", mv);
         mxopts += o;
     }
+    // non-towered airport names: up to which display range (NM); towered ones always show
+    const struct { int nm; const char *lbl; } alvals[] = {
+        {0, "Never"}, {5, "At 5 NM or closer"}, {10, "At 10 NM or closer"}, {15, "At 15 NM or closer"},
+        {20, "At 20 NM or closer"}, {AIRPORT_LABEL_ALWAYS_NM, "At every range"},
+    };
+    String alopts;
+    for (auto &av : alvals) {
+        char o[80];
+        snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", av.nm, av.nm == g_aptLabelNm ? " selected" : "", av.lbl);
+        alopts += o;
+    }
     // minimum-altitude filter options (stored in ft; labels show ft + km for clarity)
     const struct { int ft; const char *lbl; } mavals[] = {
         {0, "Off"}, {5000, "&gt; 5,000 ft (1.5 km)"}, {10000, "&gt; 10,000 ft (3 km)"},
@@ -777,6 +789,7 @@ static void handleRoot() {
         "<label><input type=checkbox class=ck %s onchange='fd(this.checked)'>Screen off when placed face-down</label>"
         "<label><input type=checkbox class=ck %s onchange='sw(this.checked)'>Show radar sweep</label>"
         "<label><input type=checkbox class=ck %s onchange='ap(this.checked)'>Show airports</label>"
+        "<label>Names of non-towered airports</label><select onchange='al(this.value)'>%s</select>"
         "<label><input type=checkbox class=ck %s onchange='hg(this.checked)'>Hide aircraft on the ground</label>"
         "<label>Minimum altitude</label><select onchange='ma(this.value)'>%s</select>"
         "<label>Maximum altitude</label><select onchange='mb(this.value)'>%s</select>"
@@ -824,6 +837,7 @@ static void handleRoot() {
         "function fd(c){G('/fdsleep?v='+(c?1:0)+'&save=1')}"
         "function sw(c){G('/sweep?v='+(c?1:0)+'&save=1')}"
         "function ap(c){G('/airports?v='+(c?1:0)+'&save=1')}"
+        "function al(v){G('/aptlabels?v='+v+'&save=1')}"
         "function hg(c){G('/ground?v='+(c?1:0)+'&save=1')}"
         "function ma(v){G('/altmin?v='+v+'&save=1')}"
         "function mb(v){G('/altmax?v='+v+'&save=1')}"
@@ -849,7 +863,7 @@ static void handleRoot() {
         g_settings.homeLat, g_settings.homeLon, gpsRow.c_str(), ropts.c_str(), topts.c_str(),
         tzopts.c_str(),
         g_brightnessDay, iopts.c_str(), g_clockOn ? "checked" : "", g_fdSleep ? "checked" : "", g_showSweep ? "checked" : "",
-        g_showAirports ? "checked" : "", g_hideGround ? "checked" : "", maopts.c_str(), mbopts.c_str(), g_milOnly ? "checked" : "",
+        g_showAirports ? "checked" : "", alopts.c_str(), g_hideGround ? "checked" : "", maopts.c_str(), mbopts.c_str(), g_milOnly ? "checked" : "",
         tlopts.c_str(), mxopts.c_str(), g_bigText ? "checked" : "", g_rotation, uopts.c_str(), tuopts.c_str(),
         g_volume, g_muted ? "checked" : "", aopts.c_str(), popts.c_str(),
         g_settings.homeLat, g_settings.homeLon, (g_tz == TZ_STR ? 0 : 1));
@@ -1173,6 +1187,21 @@ static void handleAirports() {   // show/hide airport markers (live)
     g_web.send(200, "text/plain", "ok");
 }
 
+static void handleAptLabels() {   // range up to which non-towered airports are named (live)
+    if (refuseUnlessPageFetch()) return;
+    if (g_web.hasArg("v")) {
+        g_aptLabelNm = constrain((int)g_web.arg("v").toInt(), 0, AIRPORT_LABEL_ALWAYS_NM);
+        radar::setAirportLabelMaxNm(g_aptLabelNm);
+        if (g_web.hasArg("save")) {
+            Preferences p;
+            p.begin("capsuleradar", false);
+            p.putInt("aptlbl", g_aptLabelNm);
+            p.end();
+        }
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
 static void handleFdSleep() {   // face-down sleep (screen off when flipped over) on/off
     if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
@@ -1401,6 +1430,7 @@ void setup() {
         const int t = p.getInt("theme", THEME_PHOSPHOR);
         g_showSweep = p.getBool("sweep", true);
         g_showAirports = p.getBool("airports", true);
+        g_aptLabelNm = constrain(p.getInt("aptlbl", AIRPORT_LABEL_UNTOWERED_NM_DEFAULT), 0, AIRPORT_LABEL_ALWAYS_NM);
         g_hideGround = p.getBool("hideground", false);
         g_minAltFt = p.getInt("minalt", 0);
         g_maxAltFt = p.getInt("maxalt", 0);
@@ -1414,6 +1444,7 @@ void setup() {
         radar::setTheme(t);
         radar::setSweepEnabled(g_showSweep);
         radar::setAirportsEnabled(g_showAirports);
+        radar::setAirportLabelMaxNm(g_aptLabelNm);
         g_adsb.setHideGround(g_hideGround);
         g_adsb.setMinAltFt((float)g_minAltFt);
         g_adsb.setMaxAltFt((float)g_maxAltFt);
@@ -1535,6 +1566,7 @@ void setup() {
     g_web.on("/fdsleep", handleFdSleep);
     g_web.on("/sweep", handleSweep);
     g_web.on("/airports", handleAirports);
+    g_web.on("/aptlabels", handleAptLabels);
     g_web.on("/ground", handleGround);
     g_web.on("/altmin", handleAltMin);
     g_web.on("/altmax", handleAltMax);

@@ -45,10 +45,12 @@
 // coastline outline — steel blue, deliberately off the red/amber/lime/green/cyan
 // altitude-trail palette so land never reads as an aircraft track.
 #define COAST_COLOR lv_color_hex(0x4E86C6)
-// airport markers — VFR sectional chart convention: blue for large/hub airports.
-#define AIRPORT_COLOR lv_color_hex(0x3B5FCC)
-// medium/regional airports (e.g. Class C/D fields) — sectional-style magenta, same ring size.
-#define AIRPORT_COLOR_MED lv_color_hex(0xC6357A)
+// airport markers — US VFR sectional convention: blue for fields with a control tower...
+#define AIRPORT_COLOR_TWR lv_color_hex(0x5C7CFF)   // brighter, more royal than COAST_COLOR's steel blue
+// ...magenta for non-towered fields, same ring size.
+#define AIRPORT_COLOR_NONTWR lv_color_hex(0xF052A8)
+// ...both drawn at this opacity (before the clock dim): bright enough to read on black.
+#define AIRPORT_OPA 210
 // ---- orb palette (Orb) ----
 #define ORB_BLIP   lv_color_hex(0xFFE11A)
 #define ORB_EMERG  lv_color_hex(0xFF4D2E)
@@ -312,7 +314,7 @@ static void cache_flow_draw(lv_draw_ctx_t *d, const lv_area_t *clip) {
 // The chrome the former grid layer drew, in the same z-order: coastline, airports, rings and crosshair.
 static void cache_chrome_draw(lv_draw_ctx_t *d, const lv_area_t *clip) {
     const lv_point_t c = { s_cx, s_cy };
-    // airport IATA codes: same 12 -> 16 bump as the altitude labels in large-text mode
+    // airport identifiers: same 12 -> 16 bump as the altitude labels in large-text mode
     const lv_font_t *apFont = s_bigText ? &lv_font_montserrat_16 : &lv_font_montserrat_12;
 
     if (orb()) {
@@ -342,7 +344,7 @@ static void cache_chrome_draw(lv_draw_ctx_t *d, const lv_area_t *clip) {
         td.border_width = 1;
         td.border_opa = dim(160);
         coastline_draw(d, COAST_COLOR, dim(170), 2, clip);   // landmass outline under the triangle
-        if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, AIRPORT_COLOR_MED, dim(150), apFont);
+        if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR_TWR, AIRPORT_COLOR_NONTWR, dim(AIRPORT_OPA), apFont);
         lv_draw_polygon(d, &td, tri, 3);
         return;
     }
@@ -350,7 +352,7 @@ static void cache_chrome_draw(lv_draw_ctx_t *d, const lv_area_t *clip) {
     // coastline first, so the rings/crosshair sit cleanly on top of it.
     // Steel blue + 2 px so it reads as a map outline, distinct from the green altitude trails.
     coastline_draw(d, COAST_COLOR, dim(165), 2, clip);
-    if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, AIRPORT_COLOR_MED, dim(150), apFont);
+    if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR_TWR, AIRPORT_COLOR_NONTWR, dim(AIRPORT_OPA), apFont);
 
     // phosphor: concentric rings + crosshair — 5 evenly spaced rings from center to the
     // outer edge, so each ring is always range/5 regardless of the selected zoom level.
@@ -1026,6 +1028,12 @@ void setAirportsEnabled(bool on) {
     cache_full_rerender();                             // repaint the chrome with/without markers
 }
 bool airportsEnabled() { return s_airportsEnabled; }
+
+void setAirportLabelMaxNm(int nm) {
+    if (nm == airports_label_max_nm()) return;
+    airports_set_label_max_nm(nm);
+    cache_full_rerender();                             // labels live in the cached chrome
+}
 
 // 0 = off, 1 = short, 2 = medium (default), 3 = long. Controls both the per-aircraft
 // trail and the persistent flow layer (the long-lived "where everything has been" tracks).
