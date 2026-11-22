@@ -86,6 +86,7 @@ void setSweepCompositor(void (*config)(uint16_t ring565, uint16_t lead565, uint1
 bool sweepEnabled();
 void setAirportsEnabled(bool on);                // show/hide airport markers on the scope
 bool airportsEnabled();
+void setAirportLabelMaxNm(int nm);               // label non-towered airports at this range (NM) or closer; 0 = never
 void setTrailLength(int level);                  // 0=off 1=short 2=medium 3=long (aircraft trails + flow)
 void setMaxOnScreen(int n);                       // how many (nearest) aircraft to draw on the scope
 void setLargeText(bool on);                       // accessibility: bigger glyph labels. Call BEFORE init()

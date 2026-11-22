@@ -247,6 +247,15 @@ static const float WEB_RANGE_KM[]   = {5.0f * NM_TO_KM, 10.0f * NM_TO_KM, 15.0f 
 #define ADSB_TASK_STACK_BYTES 16384
 #endif
 
+// Non-towered airport identifiers are drawn only at this display range (NM) or closer, so
+// a busy GA area doesn't bury the traffic; towered fields are always labelled. 0 = never,
+// AIRPORT_LABEL_ALWAYS_NM = at every range. A board header sets its own default to suit its
+// screen size; the web page overrides it (NVS key "aptlbl").
+#define AIRPORT_LABEL_ALWAYS_NM 999
+#ifndef AIRPORT_LABEL_UNTOWERED_NM_DEFAULT
+#define AIRPORT_LABEL_UNTOWERED_NM_DEFAULT 15
+#endif
+
 // An on/off buzzer instead of a codec (the LCD 2.1): see audio.cpp.
 #ifndef BOARD_HAS_BUZZER
 #define BOARD_HAS_BUZZER 0

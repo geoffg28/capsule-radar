@@ -36,6 +36,8 @@
 #define SCREEN_CY           300
 #define RADAR_R_OUTER_PX    288            // outer ring radius (12 px clear of the top/bottom edge)
 #define UI_SIDE_LIST_W      (PANEL_W - SCREEN_W)   // 341: docked aircraft list, right third
+// The 288 px scope has room for every airport's identifier, even at 50 NM (config.h).
+#define AIRPORT_LABEL_UNTOWERED_NM_DEFAULT AIRPORT_LABEL_ALWAYS_NM
 
 // ---------- Panel: EK79007 over MIPI-DSI ----------
 // The DSI clock/data lanes are dedicated PHY pads, not GPIOs: there is no PIN_LCD_SCLK.

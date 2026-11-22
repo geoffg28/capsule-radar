@@ -1,82 +1,128 @@
 #!/usr/bin/env python3
-"""Generate src/airports_data.h from the OurAirports airports.csv.
+"""Generate src/airports_data.h: every public-use US airport plus the world's main fields.
 
-Keeps large airports (always) and medium airports that have an IATA code, so the
-map shows the meaningful/scheduled fields without the tens of thousands of tiny
-strips. Emits int16 lat/lon (degrees * 100), a 3-letter IATA code, and a 'large'
-flag (only large airports get a label on screen).
+Two sources, each flagged towered / non-towered so the scope can colour them like a
+US VFR sectional (blue = control tower, magenta = no tower):
+
+* USA -- FAA NASR "APT" CSV (28-day subscription, public domain). Keeps every airport
+  (site type A) that is open (ARPT_STATUS O) and public use (FACILITY_USE_CODE PU);
+  heliports, seaplane bases, gliderports and private fields are left out. Towered =
+  TWR_TYPE_CODE starts with ATCT (ATCT, ATCT-TRACON, ATCT-RAPCON, ATCT-A/C, ...). The
+  label is the FAA location identifier (PAE, S43, 0S9).
+* Rest of the world -- OurAirports (public domain), which has no public/private field:
+  large airports, plus medium ones that have an IATA code (the old selection). Towered =
+  a TWR frequency in airport-frequencies.csv, or a large airport (OurAirports' frequency
+  list is patchy outside the US; large fields without one are nearly all towered anyway).
+  The label is the IATA code.
+
+Coordinates are int32 degrees * 10000 (~11 m), fine enough for the 5 NM scope.
 
 Usage:
-    python3 tools/gen_airports.py /tmp/airports.csv src/airports_data.h
+    python3 tools/gen_airports.py APT_BASE.csv airports.csv airport-frequencies.csv src/airports_data.h
 
-Source data: OurAirports (public domain). https://ourairports.com/data/
+Sources:
+    https://www.faa.gov/air_traffic/flight_info/aeronav/aero_data/NASR_Subscription/
+      (the cycle's "APT" CSV zip, file APT_BASE.csv)
+    https://ourairports.com/data/  (airports.csv, airport-frequencies.csv)
 """
 import csv
 import sys
 
-SCALE = 100.0
+SCALE = 10000
+F_TOWERED = 1   # control tower: sectional blue
+F_IATA = 2      # ident is a recognizable IATA code (weather view's "nearest airport")
+
+
+def scaled(lat, lon):
+    return (max(-90 * SCALE, min(90 * SCALE, round(lat * SCALE))),
+            max(-180 * SCALE, min(180 * SCALE, round(lon * SCALE))))
 
 
 def main():
-    src = sys.argv[1] if len(sys.argv) > 1 else "/tmp/airports.csv"
-    dst = sys.argv[2] if len(sys.argv) > 2 else "src/airports_data.h"
+    if len(sys.argv) != 5:
+        sys.exit(__doc__)
+    nasr_csv, oa_csv, freq_csv, dst = sys.argv[1:5]
 
-    rows = []
-    with open(src, newline="", encoding="utf-8") as f:
+    with open(oa_csv, newline="", encoding="utf-8") as f:
+        oa = list(csv.DictReader(f))
+    with open(freq_csv, newline="", encoding="utf-8") as f:
+        towered_oa = {r["airport_ident"] for r in csv.DictReader(f) if r["type"].upper() == "TWR"}
+
+    # FAA identifier -> IATA code, to mark which US idents double as an IATA code.
+    us_iata = {}
+    for r in oa:
+        if r["iso_country"] == "US" and r["iata_code"].strip():
+            us_iata[r["local_code"].strip().upper()] = r["iata_code"].strip().upper()
+
+    rows = []   # (lat, lon, ident, flags)
+
+    with open(nasr_csv, newline="", encoding="latin-1") as f:
         for r in csv.DictReader(f):
-            t = r["type"]
-            iata = (r.get("iata_code") or "").strip().upper()[:3]
-            if t == "large_airport":
-                large = 1
-            elif t == "medium_airport" and iata:
-                large = 0
-            else:
+            if (r["SITE_TYPE_CODE"] != "A" or r["ARPT_STATUS"] != "O"
+                    or r["FACILITY_USE_CODE"] != "PU"):
                 continue
+            ident = r["ARPT_ID"].strip().upper()[:4]
             try:
-                lat = float(r["latitude_deg"])
-                lon = float(r["longitude_deg"])
-            except (ValueError, KeyError):
+                lat, lon = float(r["LAT_DECIMAL"]), float(r["LONG_DECIMAL"])
+            except ValueError:
                 continue
-            lat_s = max(-9000, min(9000, round(lat * SCALE)))
-            lon_s = max(-18000, min(18000, round(lon * SCALE)))
-            rows.append((lat_s, lon_s, iata, large))
+            flags = F_TOWERED if r["TWR_TYPE_CODE"].startswith("ATCT") else 0
+            if us_iata.get(ident) == ident:
+                flags |= F_IATA
+            rows.append(scaled(lat, lon) + (ident, flags))
+    n_us = len(rows)
 
-    # large first isn't needed; keep file order. Stats:
-    n_large = sum(1 for r in rows if r[3])
-    with open(dst, "w") as f:
+    for r in oa:
+        if r["iso_country"] == "US":
+            continue                                    # the FAA list covers the US
+        iata = r["iata_code"].strip().upper()[:3]
+        if r["type"] == "large_airport":
+            large = True
+        elif r["type"] == "medium_airport" and iata:
+            large = False
+        else:
+            continue
+        try:
+            lat, lon = float(r["latitude_deg"]), float(r["longitude_deg"])
+        except ValueError:
+            continue
+        flags = F_TOWERED if (large or r["ident"] in towered_oa) else 0
+        if iata:
+            flags |= F_IATA
+        rows.append(scaled(lat, lon) + (iata, flags))
+
+    n_twr = sum(1 for r in rows if r[3] & F_TOWERED)
+    with open(dst, "w", newline="\n", encoding="utf-8") as f:
         f.write("// Auto-generated by tools/gen_airports.py — DO NOT EDIT.\n")
-        f.write("// Source: OurAirports (public domain).\n")
-        f.write("// %d airports (%d large w/ label, %d medium). lat,lon are int16 deg*%d.\n"
-                % (len(rows), n_large, len(rows) - n_large, int(SCALE)))
+        f.write("// Sources: FAA NASR APT (US public-use airports), OurAirports (rest of world); both public domain.\n")
+        f.write("// %d airports (%d US, %d elsewhere; %d towered). lat,lon are int32 deg*%d.\n"
+                % (len(rows), n_us, len(rows) - n_us, n_twr, SCALE))
         f.write("#pragma once\n#include <stdint.h>\n\n")
-        f.write("#define AIRPORT_SCALE %d\n" % int(SCALE))
-        f.write("#define AIRPORT_NUM %d\n\n" % len(rows))
+        f.write("#define AIRPORT_SCALE %d\n" % SCALE)
+        f.write("#define AIRPORT_NUM %d\n" % len(rows))
+        f.write("#define AIRPORT_F_TOWERED %d   // control tower (sectional blue); else magenta\n" % F_TOWERED)
+        f.write("#define AIRPORT_F_IATA %d      // ident is an IATA code\n\n" % F_IATA)
 
-        f.write("static const int16_t AIRPORT_LAT[AIRPORT_NUM] = {\n")
-        for i in range(0, len(rows), 18):
-            f.write("  " + ",".join(str(r[0]) for r in rows[i:i + 18]) + ",\n")
-        f.write("};\n\n")
+        for name, col in (("AIRPORT_LAT", 0), ("AIRPORT_LON", 1)):
+            f.write("static const int32_t %s[AIRPORT_NUM] = {\n" % name)
+            for i in range(0, len(rows), 12):
+                f.write("  " + ",".join(str(r[col]) for r in rows[i:i + 12]) + ",\n")
+            f.write("};\n\n")
 
-        f.write("static const int16_t AIRPORT_LON[AIRPORT_NUM] = {\n")
-        for i in range(0, len(rows), 18):
-            f.write("  " + ",".join(str(r[1]) for r in rows[i:i + 18]) + ",\n")
-        f.write("};\n\n")
-
-        f.write("// 1 = large airport (gets an IATA label), 0 = medium (marker only).\n")
-        f.write("static const uint8_t AIRPORT_LARGE[AIRPORT_NUM] = {\n")
+        f.write("static const uint8_t AIRPORT_FLAGS[AIRPORT_NUM] = {\n")
         for i in range(0, len(rows), 32):
             f.write("  " + ",".join(str(r[3]) for r in rows[i:i + 32]) + ",\n")
         f.write("};\n\n")
 
-        f.write("// 3-letter IATA code (may be empty for a large airport without one).\n")
-        f.write("static const char AIRPORT_IATA[AIRPORT_NUM][4] = {\n")
+        f.write("// Label: FAA identifier in the US, IATA code elsewhere (may be empty).\n")
+        f.write("static const char AIRPORT_IDENT[AIRPORT_NUM][5] = {\n")
         for i in range(0, len(rows), 12):
             f.write("  " + ",".join('"%s"' % r[2] for r in rows[i:i + 12]) + ",\n")
         f.write("};\n")
 
-    bytes_total = len(rows) * (2 + 2 + 1 + 4)
-    print("airports: %d (%d large, %d medium)" % (len(rows), n_large, len(rows) - n_large))
-    print("flash:    ~%.1f KB" % (bytes_total / 1024.0))
+    print("airports: %d (%d US public-use, %d elsewhere), %d towered"
+          % (len(rows), n_us, len(rows) - n_us, n_twr))
+    print("flash:    ~%.1f KB" % (len(rows) * (4 + 4 + 1 + 5) / 1024.0))
     print("written:  %s" % dst)
 
 
