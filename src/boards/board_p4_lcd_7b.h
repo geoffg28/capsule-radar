@@ -36,6 +36,10 @@
 #define SCREEN_CY           300
 #define RADAR_R_OUTER_PX    288            // outer ring radius (12 px clear of the top/bottom edge)
 #define UI_SIDE_LIST_W      (PANEL_W - SCREEN_W)   // 341: docked aircraft list, right third
+// Feed query cap: the 50 NM screen range, not 1.4x it. A 50 NM query that wide (~85 KB every
+// 2 s in busy airspace) wedges the C6 WiFi link within a minute and the C6 probe restarts the
+// board. Ranges up to 20 NM keep their full 1.4x margin; 50 NM loses only the edge arrows.
+#define ADSB_QUERY_MAX_KM   (50.0f * NM_TO_KM)
 // The 288 px scope has room for every airport's identifier, even at 50 NM (config.h).
 #define AIRPORT_LABEL_UNTOWERED_NM_DEFAULT AIRPORT_LABEL_ALWAYS_NM
 

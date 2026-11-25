@@ -22,7 +22,7 @@ static const float RANGE_STEPS_KM[] = {5.0f * NM_TO_KM, 10.0f * NM_TO_KM, 15.0f 
 // (STLWarehouse). The NM steps above span 9.3–92.6 km, so MULT keeps the query inside [MIN, MAX].
 #define ADSB_QUERY_MULT     1.4f
 #define ADSB_QUERY_MIN_KM   12.0f
-#define ADSB_QUERY_MAX_KM   150.0f
+// ADSB_QUERY_MAX_KM (150 km; a board may lower it) is defined after the board header below.
 // Display-range presets. The zoom button on the scope cycles RANGE_STEPS_KM (the NM steps
 // above); the web page's <select> offers WEB_RANGE_KM, the same NM steps so the page and the
 // screen always agree. Nothing goes past 150 km: the feed query clamps to ADSB_QUERY_MAX_KM,
@@ -242,6 +242,10 @@ static const float WEB_RANGE_KM[]   = {5.0f * NM_TO_KM, 10.0f * NM_TO_KM, 15.0f 
 #endif
 #define UI_SIDE_LIST_TOP    56   // docked list: rows start this far down, under the "AIRCRAFT" title
 #define UI_SIDE_LIST_PAD    8    // ...and keep this margin to the column's other edges
+
+#ifndef ADSB_QUERY_MAX_KM
+#define ADSB_QUERY_MAX_KM   150.0f   // feed query radius cap (see ADSB_QUERY_MULT above)
+#endif
 
 #ifndef ADSB_TASK_STACK_BYTES
 #define ADSB_TASK_STACK_BYTES 16384
